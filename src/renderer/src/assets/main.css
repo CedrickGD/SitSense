@@ -1,0 +1,52 @@
+@import 'tailwindcss';
+
+/* SitSense "Calm Instrument" design tokens — docs/specs/ui.md */
+@theme {
+  --color-ink: #171512;
+  --color-surface: #1e1b17;
+  --color-card: #252119;
+  --color-hairline: #37322a;
+  --color-text: #ede7dc;
+  --color-text-dim: #a39c8f;
+  --color-text-faint: #6b655a;
+  --color-sage: #93c9a2;
+  --color-sage-deep: #3a5c45;
+  --color-amber: #e5b96b;
+  --color-ember: #e08a56;
+  --color-coral: #e0655c;
+  --color-slate-cool: #8fa3b8;
+
+  --font-display: 'Bricolage Grotesque Variable', 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  --font-sans: 'Hanken Grotesk Variable', 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink text-text font-sans text-[13px] antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* the only glow in the app: the Spine Glyph's breathing halo */
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
+}

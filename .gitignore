@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+*.log
+.DS_Store
+*.local
+
+# fetched at install time by scripts/fetch-assets.mjs — never committed
+src/renderer/public/mediapipe/
+src/renderer/public/models/
