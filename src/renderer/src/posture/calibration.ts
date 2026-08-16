@@ -49,6 +49,11 @@ export class CalibrationSession {
     return tMs - this.startMs >= CAL_DURATION_S * 1000
   }
 
+  /** Capture progress in [0, 1]. */
+  progress(tMs: number): number {
+    return Math.min(1, Math.max(0, (tMs - this.startMs) / (CAL_DURATION_S * 1000)))
+  }
+
   addFrame(frame: Frame, _tMs: number): void {
     const geo = computeGeometry(frame, V_CAL)
     // a valid calibration frame requires the head (nose + ears-or-eyes)
