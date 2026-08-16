@@ -50,3 +50,41 @@ body {
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
 }
+
+@keyframes menuIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes growIn {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* range input thumb in sage */
+.slider-sage::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--color-sage);
+  cursor: pointer;
+  transition: transform 120ms ease-out;
+}
+.slider-sage::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.slider-sage:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-sage) 70%, transparent);
+}
