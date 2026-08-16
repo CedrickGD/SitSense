@@ -167,6 +167,26 @@ describe('computeRawMetrics', () => {
     expect(m.fwdPitch).toBeCloseTo(0.5, 6)
   })
 
+  it('pitch reads ~zero on the upright pose when ears drop out (eye fallback, no bias)', () => {
+    const m = computeRawMetrics(
+      computeGeometry(makeFrame({ visibility: { [LM.leftEar]: 0.2, [LM.rightEar]: 0.2 } })),
+      baseline
+    )
+    expect(m.fwdPitch).toBeCloseTo(0, 6)
+  })
+
+  it('eye-fallback pitch converts the delta into ear-scale units', () => {
+    // nose 0.06 lower, ears hidden: eye-referenced p = (0.44-0.34)/0.09 = 1.111…
+    // Pd_eye = 1.111… − 0.444… = 0.666…; ×(sEye0/sEar0 = 0.75) = 0.5 — same as ear path
+    const m = computeRawMetrics(
+      computeGeometry(
+        makeFrame({ nose: [0.5, 0.44], visibility: { [LM.leftEar]: 0.2, [LM.rightEar]: 0.2 } })
+      ),
+      baseline
+    )
+    expect(m.fwdPitch).toBeCloseTo(0.5, 6)
+  })
+
   it('measures head roll from the ear line angle', () => {
     // ears tilted: dy=-0.04 over dx=-0.12 → |Δroll| ≈ 18.435°
     const m = computeRawMetrics(

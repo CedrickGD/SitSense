@@ -82,8 +82,10 @@ export interface CalibrationBaseline {
   h0: number | null
   /** face-scale / shoulder-scale ratio */
   r0: number | null
-  /** nose-below-ears pitch proxy */
+  /** nose-below-ears pitch proxy (ear-referenced) */
   p0: number | null
+  /** nose-below-eyes pitch proxy (eye-referenced, for the ears-hidden fallback) */
+  pEye0: number | null
   /** ear-line, eye-line and shoulder-line angles (degrees) */
   phiHead0: number | null
   phiEye0: number | null

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, type JSX } from 'react'
+import { useEffect, useMemo, useState, type JSX } from 'react'
 import { ISSUE_LABELS, ISSUES, type IssueId, type Stage, type StatMinute } from '@shared/posture'
 import { formatClock, formatCountdown, formatDuration, ISSUE_SHORT, STAGE_COLOR, STAGE_LABEL } from '@renderer/lib/ui'
 import { useAppStore } from '@renderer/state/store'
@@ -20,6 +20,14 @@ function StatusColumn(): JSX.Element {
   const pause = useAppStore((s) => s.pause)
   const settings = useAppStore((s) => s.settings)
   const setRoute = useAppStore((s) => s.setRoute)
+  const [, forceTick] = useState(0)
+
+  // the "Resume — mm:ss" countdown needs a clock to tick against
+  useEffect(() => {
+    if (!pause.paused || !pause.resumeAt) return
+    const timer = setInterval(() => forceTick((t) => t + 1), 1000)
+    return () => clearInterval(timer)
+  }, [pause.paused, pause.resumeAt])
 
   const worst = snapshot ? worstIssue(snapshot.issues) : null
   const away = snapshot?.presence === 'away'
@@ -162,8 +170,13 @@ function mergeRuns(minutes: StatMinute[]): Run[] {
   const runs: Run[] = []
   for (const m of minutes) {
     const last = runs[runs.length - 1]
-    if (last && last.state === m.s && m.m - last.to <= 1) last.to = m.m
-    else runs.push({ from: m.m, to: m.m, state: m.s })
+    if (last && last.state === m.s && m.m - last.to <= 1) {
+      last.to = m.m
+    } else {
+      // minutes the app wasn't running must occupy real width, not collapse
+      if (last && m.m - last.to > 1) runs.push({ from: last.to + 1, to: m.m - 1, state: 'paused' })
+      runs.push({ from: m.m, to: m.m, state: m.s })
+    }
   }
   return runs
 }

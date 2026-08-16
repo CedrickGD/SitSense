@@ -12,6 +12,7 @@ import {
   AWAY_ENTER_S,
   AWAY_EXIT_S,
   AWAY_FULL_RESET_S,
+  DT_CAP_S,
   DWELL_FACTOR,
   PITCH_ONLY_DWELL_MULT,
   RECAL_D_MAX,
@@ -142,7 +143,8 @@ export class PostureEngine {
   }
 
   processFrame(frame: Frame, tMs: number): { snapshot: PostureSnapshot; alerts: PostureAlert[] } {
-    const dtMs = this.lastT === null ? 0 : Math.max(0, tMs - this.lastT)
+    // cap Δt so a stall/sleep gap contributes at most DT_CAP to any accumulator
+    const dtMs = this.lastT === null ? 0 : Math.min(Math.max(0, tMs - this.lastT), DT_CAP_S * 1000)
     this.lastT = tMs
     const dtS = dtMs / 1000
 
@@ -163,17 +165,21 @@ export class PostureEngine {
       }
     }
 
-    if (frameUsable) {
-      for (const key of METRIC_KEYS) {
-        const v = raw[key]
-        if (v !== undefined) this.smoothers.get(key)!.push(v, dtS)
-      }
-    }
-
     const D =
       this.baseline !== null && this.scaleSmoother.value !== null
         ? this.scaleSmoother.value / this.baseline.U0
         : null
+
+    if (frameUsable) {
+      const sinkGated = D === null || D < SINK_D_MIN || D > SINK_D_MAX
+      for (const key of METRIC_KEYS) {
+        // sink is held (not smoothed) outside the distance gate — geometry is
+        // ambiguous there and the EMA must not ingest it
+        if (key === 'sink' && sinkGated) continue
+        const v = raw[key]
+        if (v !== undefined) this.smoothers.get(key)!.push(v, dtS)
+      }
+    }
 
     // recalibration hint: view drifted far outside the calibrated distance
     if (active && D !== null) {
@@ -184,16 +190,21 @@ export class PostureEngine {
         this.recalOutMs = 0
       }
     }
+    // once the hint has fired and the view is still far off, all detectors are
+    // suspended — alerts against a bogus baseline are worse than silence
+    const driftSuspended = this.recalSuggested && D !== null && (D < RECAL_D_MIN || D > RECAL_D_MAX)
 
     const alerts: PostureAlert[] = []
     const issues = {} as Record<IssueId, IssueSnapshot>
     const leanSigned = this.smoothers.get('leanSigned')!.value
-    const direction: 'left' | 'right' = leanSigned !== null && leanSigned > 0 ? 'left' : 'right'
+    const direction: 'left' | 'right' | undefined =
+      leanSigned === null ? undefined : leanSigned > 0 ? 'left' : 'right'
 
     for (const issue of ISSUES) {
       const cfg = this.settings.issues[issue]
       const evalr = this.evaluateIssue(issue, cfg, raw, frameUsable, D)
-      const dataAvailable = evalr.available && active && this.baseline !== null && cfg.enabled
+      const dataAvailable =
+        evalr.available && active && this.baseline !== null && cfg.enabled && !driftSuspended
 
       // face-only pitch tracking is slow-mode: looking down briefly is normal
       if (issue === 'headForward' && dataAvailable && evalr.pitchOnly !== this.pitchOnly) {
@@ -201,18 +212,22 @@ export class PostureEngine {
         this.machines.headForward.updateConfig(this.machineCfg('headForward'))
       }
 
-      const fired = this.machines[issue].step(
-        { sevTrigger: evalr.sevTrigger, sevRecovery: evalr.sevRecovery, dataAvailable },
-        tMs
-      )
-      for (const a of fired) alerts.push(issue === 'lean' ? { ...a, direction } : a)
+      // while AWAY the machines are frozen entirely — the spec's data-loss
+      // reset applies only to visibility gaps while the user is present
+      if (active) {
+        const fired = this.machines[issue].step(
+          { sevTrigger: evalr.sevTrigger, sevRecovery: evalr.sevRecovery, dataAvailable },
+          tMs
+        )
+        for (const a of fired) alerts.push(issue === 'lean' && direction ? { ...a, direction } : a)
+      }
 
       issues[issue] = {
         issue,
         stage: cfg.enabled ? evalr.displayStage : 0,
         activeForMs: cfg.enabled ? this.machines[issue].episodeActiveForMs(tMs) : null,
         metric: evalr.metric,
-        ...(issue === 'lean' ? { direction } : {})
+        ...(issue === 'lean' && direction ? { direction } : {})
       }
     }
 

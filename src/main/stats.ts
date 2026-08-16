@@ -58,6 +58,9 @@ export function getTodayStats(): TodayStats {
 function currentStateKey(): StatMinute['s'] {
   if (getPauseState().paused) return 'paused'
   if (!lastSnapshot || Date.now() - lastSnapshotAt > STALE_MS) return 'paused'
+  // uncalibrated time must not count as "good" — 'paused' is the existing
+  // not-detecting bucket
+  if (!lastSnapshot.calibrated) return 'paused'
   if (lastSnapshot.presence === 'away') return 'away'
   if (lastSnapshot.worstStage === 0) return 'good'
   const worst = Object.values(lastSnapshot.issues).reduce((a, b) => (b.stage > a.stage ? b : a))
@@ -96,7 +99,10 @@ function dominant(): StatMinute['s'] | null {
 function finishMinute(): void {
   const state = dominant()
   if (state && currentMinute > 0) {
-    minutes.push({ m: currentMinute, s: state })
+    // an app restart within the same minute would otherwise duplicate the entry
+    const last = minutes[minutes.length - 1]
+    if (last && last.m === currentMinute) last.s = state
+    else minutes.push({ m: currentMinute, s: state })
     scheduleWrite()
   }
   minuteCounts = new Map()

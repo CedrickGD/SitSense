@@ -33,6 +33,7 @@ class DetectionController {
   private countdownTimer: ReturnType<typeof setInterval> | null = null
 
   private starting = false
+  private pendingRestart = false
   private wantRunning = false
   private firstInferenceOk = false
   private retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -69,8 +70,13 @@ class DetectionController {
     window.sitsense.onSettingsChanged((next) => this.applySettings(next))
     window.sitsense.onPauseChanged((pause) => {
       useAppStore.setState({ pause })
-      if (pause.paused) this.stopCapture()
-      else void this.start()
+      if (pause.paused) {
+        // a mid-capture pause would silently starve the calibration session
+        if (this.session) this.cancelCalibration()
+        this.stopCapture()
+      } else {
+        void this.start()
+      }
     })
     window.sitsense.onNavigate((route) => useAppStore.getState().setRoute(route))
     window.sitsense.onRequestCalibration(() => useAppStore.getState().setRoute('calibrate'))
@@ -97,10 +103,23 @@ class DetectionController {
     this.starting = true
     this.clearRetry()
     try {
-      this.stream = await openCamera(this.settings.cameraDeviceId)
-      const track = this.stream.getVideoTracks()[0]
+      // re-entry (retry / redundant resume): drop any existing loop and stream
+      // first so nothing stacks or leaks
+      this.loop?.stop()
+      this.loop = null
+      stopStream(this.stream)
+      this.stream = null
+
+      const stream = await openCamera(this.settings.cameraDeviceId)
+      if (!this.wantRunning) {
+        // paused while the camera was opening — release it immediately
+        stopStream(stream)
+        return
+      }
+      this.stream = stream
+      const track = stream.getVideoTracks()[0]
       if (track) track.onended = () => this.scheduleRetry()
-      this.video.srcObject = this.stream
+      this.video.srcObject = stream
       await this.video.play().catch(() => undefined)
       await this.refreshCameraList()
 
@@ -118,6 +137,12 @@ class DetectionController {
         }
       }
 
+      if (!this.wantRunning) {
+        stopStream(this.stream)
+        this.stream = null
+        this.video.srcObject = null
+        return
+      }
       const fps = PRESET_FPS[this.settings.performancePreset]
       this.loop = new FrameLoop(this.video, fps, () => this.processFrame())
       this.loop.start()
@@ -126,11 +151,22 @@ class DetectionController {
       this.frameCount = 0
       this.updateStatus({ running: true, delegate: this.delegate, targetFps: fps, cameraError: null })
     } catch (err) {
-      const kind = err instanceof CameraOpenError ? err.kind : 'in-use'
-      this.updateStatus({ running: false, cameraError: kind })
+      stopStream(this.stream)
+      this.stream = null
+      if (err instanceof CameraOpenError) {
+        this.updateStatus({ running: false, cameraError: err.kind })
+      } else {
+        // landmarker/asset failure — not the camera's fault, don't mislabel it
+        console.error('[detection] start failed:', err)
+        this.updateStatus({ running: false })
+      }
       this.scheduleRetry()
     } finally {
       this.starting = false
+      if (this.pendingRestart) {
+        this.pendingRestart = false
+        void this.restart()
+      }
     }
   }
 
@@ -148,6 +184,10 @@ class DetectionController {
   }
 
   async restart(): Promise<void> {
+    if (this.starting) {
+      this.pendingRestart = true
+      return
+    }
     const want = this.wantRunning
     this.stopCapture()
     if (want) await this.start()
@@ -178,15 +218,23 @@ class DetectionController {
 
   beginCapture(): void {
     this.session = new CalibrationSession(performance.now())
+    // the 5s capture needs ≥ ~45 samples for a solid median — temporarily lift
+    // the frame rate above the power-saving preset (restored on finish/cancel)
+    this.loop?.setFps(Math.max(PRESET_FPS.balanced, this.currentFps()))
     useAppStore.setState((s) => ({ calibration: { ...s.calibration, phase: 'capturing', progress: 0 } }))
   }
 
   cancelCalibration(): void {
     this.cancelCountdown()
     this.session = null
+    this.loop?.setFps(this.currentFps())
     useAppStore.setState((s) => ({
       calibration: { ...s.calibration, phase: 'idle', progress: 0, banner: null }
     }))
+  }
+
+  private currentFps(): number {
+    return PRESET_FPS[this.settings?.performancePreset ?? 'balanced']
   }
 
   private cancelCountdown(): void {
@@ -198,6 +246,7 @@ class DetectionController {
     if (!this.session) return
     const result = this.session.finish(Date.now(), this.settings?.cameraDeviceId ?? null)
     this.session = null
+    this.loop?.setFps(this.currentFps())
     if (result.ok) {
       void useAppStore.getState().patchSettings({ calibration: result.baseline })
       useAppStore.setState((s) => ({ calibration: { ...s.calibration, phase: 'done', banner: null } }))

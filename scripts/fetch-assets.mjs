@@ -46,4 +46,6 @@ if (existsSync(modelDest) && statSync(modelDest).size > 1_000_000) {
   }
 }
 
-process.exit(ok ? 0 : 0) // never fail the install; warnings above tell the dev what to do
+// postinstall stays lenient (warnings only), but `--strict` (used by the dist
+// scripts) fails hard — an installer without wasm/model would ship a dead app
+process.exit(ok || !process.argv.includes('--strict') ? 0 : 1)

@@ -26,6 +26,8 @@ export function getSettings(): Settings {
 
 /** Deep-partial patch; arrays and null replace wholesale. */
 export function updateSettings(patch: unknown): Settings {
+  // a null/scalar top-level "patch" must never wipe the whole settings object
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return settings
   settings = mergeSettings(deepMerge(settings, patch))
   scheduleSave()
   for (const l of listeners) l(settings)

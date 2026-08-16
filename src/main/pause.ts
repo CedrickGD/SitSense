@@ -37,6 +37,15 @@ export function onPauseChanged(l: Listener): () => void {
   return () => listeners.delete(l)
 }
 
+/**
+ * setTimeout drifts across system sleep: the resumeAt deadline can pass while
+ * the timer is suspended. Call this on powerMonitor resume (and periodically)
+ * to honor the wall-clock deadline the UI shows.
+ */
+export function reconcilePause(): void {
+  if (paused && resumeAt !== null && Date.now() >= resumeAt) setPause(false)
+}
+
 /** While monitoring (not paused), keep Windows from suspending the app. */
 function syncPowerSaveBlocker(): void {
   if (!paused && blockerId === null) {
@@ -49,4 +58,5 @@ function syncPowerSaveBlocker(): void {
 
 export function initPowerSaveBlocker(): void {
   syncPowerSaveBlocker()
+  setInterval(reconcilePause, 30_000)
 }

@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, shell } from 'electron'
 
 let mainWindow: BrowserWindow | null = null
 let quitting = false
@@ -36,7 +36,8 @@ export function createMainWindow(options: { startHidden: boolean; firstHideHint:
     show: false,
     frame: false,
     backgroundColor: '#171512',
-    icon: join(__dirname, '../../build/icon.ico'),
+    // packaged builds use the exe's own icon; build/ isn't shipped in the asar
+    ...(app.isPackaged ? {} : { icon: join(__dirname, '../../build/icon.ico') }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

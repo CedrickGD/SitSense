@@ -2,6 +2,7 @@ import type { IssueId, PostureAlert, Stage } from '@shared/posture'
 import {
   BAND_HOLD_MAX_S,
   DATA_LOSS_RESET_S,
+  DT_CAP_S,
   ESC_DWELL_S,
   ESC_MIN_GAP_S,
   REC_DWELL_S
@@ -76,7 +77,9 @@ export class EpisodeMachine {
   }
 
   step(input: EpisodeInput, tMs: number): PostureAlert[] {
-    const dtMs = this.lastT === null ? 0 : Math.max(0, tMs - this.lastT)
+    // capped Δt: a stall, sleep gap, or away-freeze seam contributes at most
+    // DT_CAP to any accumulator (timestamps like cooldownUntil are unaffected)
+    const dtMs = this.lastT === null ? 0 : Math.min(Math.max(0, tMs - this.lastT), DT_CAP_S * 1000)
     this.lastT = tMs
     const alerts: PostureAlert[] = []
 

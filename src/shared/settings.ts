@@ -102,5 +102,9 @@ export function mergeSettings(persisted: unknown): Settings {
   }
   out.notifications.dwellSeconds = Math.min(30, Math.max(5, Number(out.notifications.dwellSeconds) || 12))
   out.notifications.cooldownMinutes = Math.min(10, Math.max(1, Number(out.notifications.cooldownMinutes) || 3))
+  // enum fields from stale files must fall back, not poison frame pacing etc.
+  if (!(out.performancePreset in PRESET_FPS)) out.performancePreset = 'balanced'
+  if (!['auto', 'GPU', 'CPU'].includes(out.delegate)) out.delegate = 'auto'
+  if (out.resolvedDelegate !== 'GPU' && out.resolvedDelegate !== 'CPU') out.resolvedDelegate = null
   return out
 }

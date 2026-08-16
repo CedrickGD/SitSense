@@ -76,6 +76,15 @@ describe('CalibrationSession', () => {
     expect(b.p0).toBeCloseTo(0.5, 6)
   })
 
+  it('captures eye-referenced baselines even when ears are visible', () => {
+    const result = runSession(uprightFrames(60)).finish()
+    if (!result.ok) throw new Error(`expected success, got ${result.reason}`)
+    // pEye = (0.38-0.34)/0.09; phiEye0 from the eye line — both must exist so
+    // the runtime can switch reference lines the moment ears drop out
+    expect(result.baseline.pEye0).toBeCloseTo(0.4 / 0.9, 6)
+    expect(result.baseline.phiEye0).not.toBeNull()
+  })
+
   it('reports completion once the capture window has elapsed', () => {
     const session = new CalibrationSession(1000)
     expect(session.isComplete(5500)).toBe(false)

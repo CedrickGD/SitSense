@@ -30,6 +30,7 @@ export class CalibrationSession {
     h: [] as number[],
     r: [] as number[],
     p: [] as number[],
+    pEye: [] as number[],
     phiHead: [] as number[],
     phiEye: [] as number[],
     phiSh: [] as number[],
@@ -74,12 +75,13 @@ export class CalibrationSession {
     if (geo.nose !== null && geo.sEar !== null && geo.sEar > 0 && geo.earMid !== null) {
       s.p.push((geo.nose.y - geo.earMid.y) / geo.sEar)
     }
-    if (geo.headAngleSource === 'ears' && geo.headAngleDeg !== null) s.phiHead.push(geo.headAngleDeg)
-    if (geo.eyeMid !== null && geo.groups.eyes) {
-      // eye-line angle is tracked separately so the runtime eye-fallback has its own reference
-      const eyeAngle = geo.headAngleSource === 'eyes' ? geo.headAngleDeg : null
-      if (eyeAngle !== null) s.phiEye.push(eyeAngle)
+    // eye-referenced baselines are captured whenever eyes are usable — the
+    // runtime falls back to them the moment ears drop out mid-session
+    if (geo.nose !== null && geo.sEye !== null && geo.sEye > 0 && geo.eyeMid !== null) {
+      s.pEye.push((geo.nose.y - geo.eyeMid.y) / geo.sEye)
     }
+    if (geo.headAngleSource === 'ears' && geo.headAngleDeg !== null) s.phiHead.push(geo.headAngleDeg)
+    if (geo.eyeAngleDeg !== null) s.phiEye.push(geo.eyeAngleDeg)
     if (geo.shAngleDeg !== null) s.phiSh.push(geo.shAngleDeg)
   }
 
@@ -135,6 +137,7 @@ export class CalibrationSession {
       h0: capShoulders && s.h.length > 0 ? median(s.h) : null,
       r0: capShoulders && s.r.length > 0 ? median(s.r) : null,
       p0: s.p.length > 0 ? median(s.p) : null,
+      pEye0: s.pEye.length > 0 ? median(s.pEye) : null,
       phiHead0: s.phiHead.length > 0 ? median(s.phiHead) : null,
       phiEye0: s.phiEye.length > 0 ? median(s.phiEye) : null,
       phiSh0: capShoulders && s.phiSh.length > 0 ? median(s.phiSh) : null,

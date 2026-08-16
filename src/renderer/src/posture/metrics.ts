@@ -26,6 +26,7 @@ const EMPTY_GEOMETRY: FrameGeometry = {
   sEye: null,
   headAngleDeg: null,
   headAngleSource: null,
+  eyeAngleDeg: null,
   shAngleDeg: null
 }
 
@@ -59,6 +60,7 @@ export function computeGeometry(frame: Frame, vThresh: number = V_LM): FrameGeom
         ? lineAngleDeg(frame[LM.leftEyeOuter], frame[LM.rightEyeOuter])
         : null,
     headAngleSource: ears ? 'ears' : eyes ? 'eyes' : null,
+    eyeAngleDeg: eyes ? lineAngleDeg(frame[LM.leftEyeOuter], frame[LM.rightEyeOuter]) : null,
     shAngleDeg: shoulders ? lineAngleDeg(frame[LM.leftShoulder], frame[LM.rightShoulder]) : null
   }
 }
@@ -111,8 +113,20 @@ export function computeRawMetrics(geo: FrameGeometry, baseline: CalibrationBasel
   if (sFace !== null && geo.sSh !== null && geo.sSh > 0 && baseline.r0 !== null && baseline.r0 > 0) {
     m.fwdFace = sFace / geo.sSh / baseline.r0 - 1
   }
-  if (geo.nose !== null && geo.headMid !== null && sFace !== null && sFace > 0 && baseline.p0 !== null) {
-    m.fwdPitch = (geo.nose.y - geo.headMid.y) / sFace - baseline.p0
+  // pitch is compared against the baseline of the SAME reference line (ears or
+  // eyes) — mixing them injects a constant bias larger than the slight threshold
+  if (geo.nose !== null) {
+    if (geo.earMid !== null && geo.sEar !== null && geo.sEar > 0 && baseline.p0 !== null) {
+      m.fwdPitch = (geo.nose.y - geo.earMid.y) / geo.sEar - baseline.p0
+    } else if (geo.eyeMid !== null && geo.sEye !== null && geo.sEye > 0 && baseline.pEye0 !== null) {
+      // eye-referenced delta, converted into ear-scale units so the Pd
+      // thresholds keep their meaning (0.75 ≈ anthropometric eye/ear ratio)
+      const toEarUnits =
+        baseline.sEye0 !== null && baseline.sEar0 !== null && baseline.sEar0 > 0
+          ? baseline.sEye0 / baseline.sEar0
+          : 0.75
+      m.fwdPitch = ((geo.nose.y - geo.eyeMid.y) / geo.sEye - baseline.pEye0) * toEarUnits
+    }
   }
 
   // Issue 3 — side lean: head roll, shoulder tilt, lateral offset

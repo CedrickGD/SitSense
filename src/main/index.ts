@@ -4,7 +4,7 @@ import { handleAppProtocol, registerAppScheme } from './app-protocol'
 import { applyAutostart } from './autostart'
 import { registerIpc } from './ipc'
 import { trayHint } from './notifications'
-import { initPowerSaveBlocker, onPauseChanged, setPause } from './pause'
+import { initPowerSaveBlocker, onPauseChanged, reconcilePause, setPause } from './pause'
 import { getSettings, loadSettings, saveNow, updateSettings } from './settings-store'
 import { initStats, stopStats } from './stats'
 import { createTray, destroyTray, refreshTray } from './tray'
@@ -63,8 +63,18 @@ if (!app.requestSingleInstanceLock()) {
       refreshTray()
     })
 
-    // camera streams often die silently across sleep/resume — renderer reacquires
-    powerMonitor.on('resume', () => sendToRenderer(IPC.systemResumed))
+    // camera streams often die silently across sleep/resume — renderer reacquires;
+    // timed pauses are reconciled against their wall-clock deadline
+    powerMonitor.on('resume', () => {
+      reconcilePause()
+      sendToRenderer(IPC.systemResumed)
+    })
+  })
+
+  // Windows shutdown/logoff must not be blocked by the close-to-tray handler
+  app.on('session-end' as never, () => {
+    markQuitting()
+    app.quit()
   })
 
   // the tray keeps the app alive; quitting happens only via the tray menu

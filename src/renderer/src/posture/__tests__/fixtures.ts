@@ -58,6 +58,8 @@ export function uprightBaseline(overrides: Partial<CalibrationBaseline> = {}): C
     h0: 1.0,
     r0: 0.4,
     p0: 0.5,
+    // eye-referenced pitch: (0.38 − 0.34) / 0.09
+    pEye0: 0.4 / 0.9,
     phiHead0: 180,
     phiEye0: 180,
     phiSh0: 180,

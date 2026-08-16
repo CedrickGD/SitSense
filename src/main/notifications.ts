@@ -1,5 +1,6 @@
 import { Notification } from 'electron'
 import type { IssueId, PostureAlert, Stage } from '../shared/posture'
+import { getPauseState } from './pause'
 import { getSettings } from './settings-store'
 import { showMainWindow } from './window'
 
@@ -46,6 +47,7 @@ function interpolate(text: string, alert: PostureAlert): string {
  */
 export function fireAlert(alert: PostureAlert): void {
   const s = getSettings()
+  if (getPauseState().paused) return // a last frame can race the pause switch
   if (!s.notifications.enabled) return
   if (alert.kind === 'recovery') return // v1: tracked silently
   const issue = s.issues[alert.issue]

@@ -137,6 +137,17 @@ describe('PostureEngine — presence', () => {
     expect(back.snapshot.presence).toBe('active')
   })
 
+  it('a 10-30s away break freezes episodes instead of wiping them', () => {
+    const e = new PostureEngine(uprightBaseline(), settings())
+    run(e, makeFrame(), 0, 1_000)
+    run(e, slouched(0.12), 1_000, 2_500) // ~1s accrued toward the 2s dwell
+    run(e, null, 2_500, 17_500) // 15s away — under the 30s full-reset line
+    // returns STILL slouching: presence exits away ~1.5s in, and the frozen
+    // dwell must resume (not restart) → alert well before a fresh 2s dwell
+    const resumed = run(e, slouched(0.12), 17_500, 21_000)
+    expect(resumed.alerts.filter((a) => a.issue === 'sink')).toHaveLength(1)
+  })
+
   it('a long away break resets episodes and cooldowns', () => {
     const e = new PostureEngine(uprightBaseline(), settings())
     run(e, makeFrame(), 0, 1_000)

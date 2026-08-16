@@ -39,6 +39,8 @@ export interface FrameGeometry {
   /** ear-line angle in degrees, or eye-line fallback marker */
   headAngleDeg: number | null
   headAngleSource: 'ears' | 'eyes' | null
+  /** eye-line angle, always computed when eyes are usable (fallback baseline) */
+  eyeAngleDeg: number | null
   shAngleDeg: number | null
 }
 

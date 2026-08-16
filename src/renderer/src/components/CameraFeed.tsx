@@ -1,4 +1,4 @@
-import { useEffect, useRef, type JSX } from 'react'
+import { useEffect, useRef, useState, type JSX } from 'react'
 import type { CameraError } from '@shared/posture'
 import { detectionController } from '@renderer/detection/controller'
 import { LM } from '@renderer/posture/constants'
@@ -7,8 +7,12 @@ import { useAppStore } from '@renderer/state/store'
 import { STAGE_COLOR } from '@renderer/lib/ui'
 import { Button, EmptyState } from './primitives'
 
-function PoseOverlay({ landmarks }: { landmarks: Landmark[] }): JSX.Element {
+function PoseOverlay({ landmarks, aspect }: { landmarks: Landmark[]; aspect: number }): JSX.Element {
   const color = STAGE_COLOR[useAppStore((s) => s.snapshot?.worstStage ?? 0)]
+  // viewBox mirrors the video's intrinsic aspect and 'slice' crops exactly like
+  // object-cover, so overlay points land on the pixels they were detected on
+  const vw = 100
+  const vh = 100 / (aspect || 4 / 3)
   const pts = [LM.nose, LM.leftEyeOuter, LM.rightEyeOuter, LM.leftEar, LM.rightEar, LM.leftShoulder, LM.rightShoulder]
   const seg = (a: number, b: number): JSX.Element | null => {
     const pa = landmarks[a]
@@ -17,10 +21,10 @@ function PoseOverlay({ landmarks }: { landmarks: Landmark[] }): JSX.Element {
     return (
       <line
         key={`${a}-${b}`}
-        x1={pa.x * 100}
-        y1={pa.y * 100}
-        x2={pb.x * 100}
-        y2={pb.y * 100}
+        x1={pa.x * vw}
+        y1={pa.y * vh}
+        x2={pb.x * vw}
+        y2={pb.y * vh}
         stroke={color}
         strokeWidth={0.6}
         opacity={0.8}
@@ -39,18 +43,18 @@ function PoseOverlay({ landmarks }: { landmarks: Landmark[] }): JSX.Element {
 
   return (
     <svg
-      viewBox="0 0 100 100"
-      preserveAspectRatio="none"
+      viewBox={`0 0 ${vw} ${vh}`}
+      preserveAspectRatio="xMidYMid slice"
       className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100"
     >
       {seg(LM.leftShoulder, LM.rightShoulder)}
       {seg(LM.leftEar, LM.rightEar)}
       {neckVisible && (
         <line
-          x1={earMidX * 100}
-          y1={earMidY * 100}
-          x2={shMidX * 100}
-          y2={shMidY * 100}
+          x1={earMidX * vw}
+          y1={earMidY * vh}
+          x2={shMidX * vw}
+          y2={shMidY * vh}
           stroke={color}
           strokeWidth={0.6}
           opacity={0.8}
@@ -63,8 +67,8 @@ function PoseOverlay({ landmarks }: { landmarks: Landmark[] }): JSX.Element {
         return (
           <circle
             key={i}
-            cx={p.x * 100}
-            cy={p.y * 100}
+            cx={p.x * vw}
+            cy={p.y * vh}
             r={1.1}
             fill={color}
             opacity={dim ? 0.35 : 0.85}
@@ -122,6 +126,7 @@ interface CameraFeedProps {
 
 export default function CameraFeed({ showAway = true }: CameraFeedProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const [aspect, setAspect] = useState(4 / 3)
   const detection = useAppStore((s) => s.detection)
   const overlay = useAppStore((s) => s.overlay)
   const snapshot = useAppStore((s) => s.snapshot)
@@ -130,6 +135,10 @@ export default function CameraFeed({ showAway = true }: CameraFeedProps): JSX.El
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
+    const onMeta = (): void => {
+      if (v.videoWidth > 0 && v.videoHeight > 0) setAspect(v.videoWidth / v.videoHeight)
+    }
+    v.addEventListener('loadedmetadata', onMeta)
     // share the controller's MediaStream; reattach whenever detection restarts
     const attach = (): void => {
       const stream = detectionController.getStream()
@@ -140,7 +149,10 @@ export default function CameraFeed({ showAway = true }: CameraFeedProps): JSX.El
     }
     attach()
     const timer = setInterval(attach, 1000)
-    return () => clearInterval(timer)
+    return () => {
+      v.removeEventListener('loadedmetadata', onMeta)
+      clearInterval(timer)
+    }
   }, [detection.running])
 
   const away = showAway && snapshot?.presence === 'away'
@@ -159,7 +171,7 @@ export default function CameraFeed({ showAway = true }: CameraFeedProps): JSX.El
               pause.paused ? 'opacity-40 blur-md saturate-0' : ''
             }`}
           />
-          {overlay && !pause.paused && <PoseOverlay landmarks={overlay} />}
+          {overlay && !pause.paused && <PoseOverlay landmarks={overlay} aspect={aspect} />}
           {/* plumb line: the calibrated center, the app's alignment motif */}
           {!pause.paused && <div className="absolute inset-y-0 left-1/2 w-px bg-white/10" />}
           {away && (

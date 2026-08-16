@@ -1,4 +1,4 @@
-import { useState, type JSX, type ReactNode } from 'react'
+import { Fragment, useState, type JSX, type ReactNode } from 'react'
 import { ISSUE_LABELS, ISSUES, type IssueId } from '@shared/posture'
 import { PRESET_FPS, type PerformancePreset, type Settings } from '@shared/settings'
 import { STAGE_COLOR } from '@renderer/lib/ui'
@@ -208,12 +208,10 @@ export default function SettingsScreen(): JSX.Element {
                       </span>
                     ))}
                     {ISSUES.map((issue) => (
-                      <>
-                        <span key={`${issue}-label`} className="text-left text-[13px] text-text">
-                          {ISSUE_LABELS[issue]}
-                        </span>
+                      <Fragment key={issue}>
+                        <span className="text-left text-[13px] text-text">{ISSUE_LABELS[issue]}</span>
                         {[0, 1, 2].map((k) => (
-                          <label key={`${issue}-${k}`} className="flex items-center justify-center">
+                          <label key={k} className="flex items-center justify-center">
                             <input
                               type="checkbox"
                               checked={settings.issues[issue].notifyStages[k]}
@@ -226,7 +224,7 @@ export default function SettingsScreen(): JSX.Element {
                             />
                           </label>
                         ))}
-                      </>
+                      </Fragment>
                     ))}
                   </div>
                   <p className="mt-2 text-[11px] text-text-faint">

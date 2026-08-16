@@ -149,7 +149,13 @@ export default function CalibrationWizard(): JSX.Element {
                 <Button variant="primary" onClick={() => detectionController.beginCountdown()}>
                   Retry capture
                 </Button>
-                <Button variant="ghost" onClick={() => setStep('position')}>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    detectionController.startPlacementCheck() // un-freeze the checklist
+                    setStep('position')
+                  }}
+                >
                   Back
                 </Button>
               </div>
@@ -159,7 +165,14 @@ export default function CalibrationWizard(): JSX.Element {
               <Button variant="primary" onClick={() => detectionController.beginCountdown()}>
                 Capture my baseline
               </Button>
-              <Button variant="ghost" disabled={capturing} onClick={() => setStep('position')}>
+              <Button
+                variant="ghost"
+                disabled={capturing}
+                onClick={() => {
+                  detectionController.startPlacementCheck()
+                  setStep('position')
+                }}
+              >
                 Back
               </Button>
             </div>

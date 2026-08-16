@@ -72,6 +72,8 @@ export function trayPostureUpdate(snapshot: PostureSnapshot): void {
   refreshTray()
 }
 
+let lastStatusText = ''
+
 export function refreshTray(): void {
   if (!tray) return
   const state = computeState()
@@ -80,14 +82,21 @@ export function refreshTray(): void {
     const icon = icons[state]
     if (icon) tray.setImage(icon)
   }
-  tray.setToolTip(`SitSense — ${statusText()}`)
-  rebuildMenu()
+  // rebuild the (immutable) menu only when its content actually changed —
+  // replacing it on every posture update can close an open menu mid-click
+  const status = statusText()
+  if (status !== lastStatusText) {
+    lastStatusText = status
+    tray.setToolTip(`SitSense — ${status}`)
+    rebuildMenu()
+  }
   syncCountdownTimer()
 }
 
 function computeState(): TrayState {
   if (getPauseState().paused) return 'paused'
   if (!lastSnapshot) return 'off'
+  if (!lastSnapshot.calibrated) return 'off'
   if (lastSnapshot.presence === 'away') return 'away'
   if (lastSnapshot.worstStage >= 3) return 'bad'
   if (lastSnapshot.worstStage >= 1) return 'warn'
@@ -100,6 +109,7 @@ function statusText(): string {
     return pause.resumeAt ? `paused, resumes in ${minutesLeft(pause.resumeAt)}` : 'paused'
   }
   if (!lastSnapshot) return 'not detecting'
+  if (!lastSnapshot.calibrated) return 'not calibrated'
   if (lastSnapshot.presence === 'away') return 'away'
   if (lastSnapshot.worstStage === 0) return 'good posture'
   const worst = Object.values(lastSnapshot.issues).reduce((a, b) => (b.stage > a.stage ? b : a))
