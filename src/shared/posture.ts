@@ -36,6 +36,8 @@ export interface PostureSnapshot {
   issues: Record<IssueId, IssueSnapshot>
   worstStage: Stage
   calibrated: boolean
+  /** the camera view has drifted far from the calibrated distance for a while */
+  recalibrationSuggested: boolean
   ts: number
 }
 
