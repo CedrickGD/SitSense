@@ -1,59 +1,84 @@
-import { app, BrowserWindow, shell } from 'electron'
-import { join } from 'node:path'
+import { app, powerMonitor } from 'electron'
+import { IPC } from '../shared/ipc'
+import { handleAppProtocol, registerAppScheme } from './app-protocol'
+import { applyAutostart } from './autostart'
+import { registerIpc } from './ipc'
+import { trayHint } from './notifications'
+import { initPowerSaveBlocker, onPauseChanged, setPause } from './pause'
+import { getSettings, loadSettings, saveNow, updateSettings } from './settings-store'
+import { initStats, stopStats } from './stats'
+import { createTray, destroyTray, refreshTray } from './tray'
+import { createMainWindow, markQuitting, sendToRenderer, showMainWindow } from './window'
 
 // AUMID must match electron-builder appId — Windows attributes toasts through it.
 app.setAppUserModelId('com.cedrickgd.sitsense')
 
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) {
+// must run before app.whenReady()
+registerAppScheme()
+
+if (!app.requestSingleInstanceLock()) {
   app.quit()
-}
+} else {
+  app.on('second-instance', () => showMainWindow())
 
-let mainWindow: BrowserWindow | null = null
+  app.whenReady().then(() => {
+    handleAppProtocol()
+    const settings = loadSettings()
+    applyAutostart(settings)
+    registerIpc()
+    initStats()
+    initPowerSaveBlocker()
 
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 980,
-    height: 660,
-    minWidth: 780,
-    minHeight: 580,
-    show: false,
-    frame: false,
-    backgroundColor: '#171512',
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      backgroundThrottling: false
-    }
+    createTray({
+      onOpen: () => showMainWindow(),
+      onPause: (minutes) => setPause(true, minutes),
+      onResume: () => setPause(false),
+      onRecalibrate: () => {
+        showMainWindow()
+        sendToRenderer(IPC.requestCalibration)
+      },
+      onSettings: () => {
+        showMainWindow()
+        sendToRenderer(IPC.navigate, 'settings')
+      },
+      onQuit: () => {
+        markQuitting()
+        app.quit()
+      }
+    })
+
+    const startHidden = process.argv.includes('--hidden') || settings.general.startHidden
+    createMainWindow({
+      startHidden,
+      firstHideHint: () => {
+        if (!getSettings().onboarded) {
+          trayHint()
+          updateSettings({ onboarded: true })
+        }
+      }
+    })
+
+    onPauseChanged((state) => {
+      sendToRenderer(IPC.pauseChanged, state)
+      refreshTray()
+    })
+
+    // camera streams often die silently across sleep/resume — renderer reacquires
+    powerMonitor.on('resume', () => sendToRenderer(IPC.systemResumed))
   })
 
-  mainWindow.on('ready-to-show', () => mainWindow?.show())
-
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
-    return { action: 'deny' }
+  // the tray keeps the app alive; quitting happens only via the tray menu
+  app.on('window-all-closed', () => {
+    /* keep running */
   })
 
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
-  }
+  app.on('before-quit', () => {
+    markQuitting()
+  })
+
+  app.on('quit', () => {
+    stopStats()
+    saveNow()
+    destroyTray()
+  })
 }
-
-app.on('second-instance', () => {
-  if (mainWindow) {
-    mainWindow.show()
-    mainWindow.focus()
-  }
-})
-
-app.whenReady().then(() => {
-  createWindow()
-})
-
-app.on('window-all-closed', () => {
-  app.quit()
-})

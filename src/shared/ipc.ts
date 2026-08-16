@@ -25,8 +25,11 @@ export const IPC = {
   settingsChanged: 'settings:changed',
   pauseChanged: 'pause:changed',
   requestCalibration: 'control:calibrate',
+  navigate: 'control:navigate',
   systemResumed: 'system:resumed'
 } as const
+
+export type AppRoute = 'dashboard' | 'calibrate' | 'settings'
 
 export interface PauseState {
   paused: boolean
@@ -62,5 +65,6 @@ export interface SitSenseApi {
   onSettingsChanged(cb: (s: Settings) => void): () => void
   onPauseChanged(cb: (p: PauseState) => void): () => void
   onRequestCalibration(cb: () => void): () => void
+  onNavigate(cb: (route: AppRoute) => void): () => void
   onSystemResumed(cb: () => void): () => void
 }

@@ -4,6 +4,14 @@
 export const ISSUES = ['sink', 'headForward', 'lean', 'tooClose'] as const
 export type IssueId = (typeof ISSUES)[number]
 
+/** Status vocabulary — used identically everywhere (dashboard, tray, settings). */
+export const ISSUE_LABELS: Record<IssueId, string> = {
+  sink: 'Slouching',
+  headForward: 'Head forward',
+  lean: 'Leaning to one side',
+  tooClose: 'Too close to screen'
+}
+
 /** 0 = fine, 1 = slight, 2 = clear, 3 = severe */
 export type Stage = 0 | 1 | 2 | 3
 

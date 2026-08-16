@@ -26,6 +26,7 @@ const api: SitSenseApi = {
   onSettingsChanged: (cb) => subscribe(IPC.settingsChanged, cb as (...args: unknown[]) => void),
   onPauseChanged: (cb) => subscribe(IPC.pauseChanged, cb as (...args: unknown[]) => void),
   onRequestCalibration: (cb) => subscribe(IPC.requestCalibration, cb as (...args: unknown[]) => void),
+  onNavigate: (cb) => subscribe(IPC.navigate, cb as (...args: unknown[]) => void),
   onSystemResumed: (cb) => subscribe(IPC.systemResumed, cb as (...args: unknown[]) => void)
 }
 
