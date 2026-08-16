@@ -1,0 +1,27 @@
+# appId MUST match app.setAppUserModelId in src/main/index.ts —
+# Windows attributes toast notifications through it.
+appId: com.cedrickgd.sitsense
+productName: SitSense
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**
+  - resources/**
+  - '!**/node_modules/**'
+asarUnpack:
+  - resources/** # tray ICOs need real file paths on disk
+win:
+  target:
+    - nsis
+    - portable
+  icon: build/icon.ico
+nsis:
+  oneClick: true
+  perMachine: false # per-user: no UAC prompt, HKCU autostart works cleanly
+  createStartMenuShortcut: true # REQUIRED for reliable toasts (AUMID shortcut)
+  createDesktopShortcut: true
+  runAfterFinish: true
+portable:
+  artifactName: SitSense-portable-${version}.exe
+npmRebuild: false
