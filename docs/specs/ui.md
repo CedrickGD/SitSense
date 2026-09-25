@@ -114,7 +114,7 @@ Scale: 12 / 13 (base UI) / 15 / 18 / 24 / 34 / 48px. Base UI text is 13px `text-
 - Overlay, chosen in Settings → Camera overlay (`overlay.style`):
   - **Mesh** (default): a triangulated wireframe that fills the whole silhouette. The pose model's segmentation mask supplies the outline, and a jittered lattice rides on the shoulder line, so the mesh moves with the body instead of sliding over it. The face oval carries MediaPipe's canonical 468-point face mesh, with eyes and lips as bright contours. The silhouette outline is brighter than the interior; tracked joints get small target rings; a scanner band sweeps down the body every few seconds (off under `prefers-reduced-motion`). Drawn on a canvas at ≤30 fps, easing between detection frames so it stays fluid at 5 fps.
   - **Hologram**: the same mesh over a dimmed, desaturated feed with faint scanlines, so the wireframe glows.
-  - **Skeleton**: the original minimal markers (head + shoulder line + neck).
+  - **Skeleton**: the original minimal markers (head + shoulder line + neck). With a fixed hue, the head, neck or shoulder markers take the active issue's stage color.
   - **Off**: camera image only.
 - Overlay color (`overlay.color`): **Posture** follows the stage colors (sage → amber → ember → coral). A fixed hue (ice, cyan, violet, magenta, lime, gold, white or a custom pick) stays constant, and the body region of each active issue glows in that issue's stage color (head for head-forward/too-close, neck for slouching, shoulders for leaning).
 - Mesh work (segmentation output + face landmarker) runs only while a mesh preview is mounted **and** the window is visible. In the tray, the app runs pose detection only. If segmentation is unavailable, the mesh styles fall back to the skeleton.

@@ -44,6 +44,8 @@ class DetectionController {
   private faceLoading = false
   private faceGpuBroken = false
   private faceFailed = false
+  /** bumped on every release, so a load still in flight can't be adopted afterwards */
+  private faceGen = 0
   /** how long the last frame took, all models included */
   private frameCostMs = 0
   /** whether this calibration capture can afford the face model (decided once per capture) */
@@ -350,6 +352,14 @@ class DetectionController {
         this.updateStatus({ delegate: 'CPU' })
         return
       }
+      if (this.masksOn && !this.masksFailed) {
+        // the segmentation graph is the newest moving part — drop it before
+        // it can take posture detection down (syncMasks switches it off next frame)
+        console.warn('[detection] inference failed with segmentation on — disabling the mesh preview:', err)
+        this.masksFailed = true
+        useAppStore.setState({ meshUnavailable: true })
+        return
+      }
       console.error('[detection] inference failed:', err)
       return
     } finally {
@@ -397,6 +407,7 @@ class DetectionController {
       this.masksFailed = true
       this.masksOn = false
       useAppStore.setState({ meshUnavailable: true })
+      await this.recoverPoseGraph()
     }
     if (!this.masksOn) {
       this.meshBuilder.reset()
@@ -405,18 +416,45 @@ class DetectionController {
     }
   }
 
+  /**
+   * setOptions() swaps the pose graph before it reports errors, so after a
+   * failed switch the old graph is gone. Posture detection must not die with
+   * the cosmetic mesh: rebuild a mask-free graph, or recreate the landmarker.
+   */
+  private async recoverPoseGraph(): Promise<void> {
+    if (!this.landmarker) return
+    try {
+      await this.landmarker.setOptions({ outputSegmentationMasks: false })
+    } catch (err) {
+      console.error('[detection] landmarker unusable after the segmentation failure — recreating it:', err)
+      try {
+        this.landmarker.close()
+      } catch {
+        // already broken
+      }
+      this.landmarker = null
+      this.delegate = null
+      if (this.wantRunning) void this.restart()
+    }
+  }
+
   /** Loads the face landmarker in the background; the mesh uses a plain head until it's ready. */
   private ensureFace(): void {
     if (this.face || this.faceLoading || this.faceFailed || !this.delegate) return
     this.faceLoading = true
-    createFaceLandmarker(this.delegate === 'GPU' && !this.faceGpuBroken ? 'GPU' : 'CPU')
+    const gen = this.faceGen
+    const delegate = this.delegate === 'GPU' && !this.faceGpuBroken ? 'GPU' : 'CPU'
+    createFaceLandmarker(delegate)
       .then((face) => {
-        if (this.masksOn) this.face = face
-        else face.close() // the preview went away while it loaded
+        if (gen === this.faceGen && this.masksOn) this.face = face
+        else face.close() // released (pause, restart, delegate change, preview gone) while it loaded
       })
       .catch((err) => {
-        console.warn('[detection] face mesh unavailable — the wireframe keeps a plain head:', err)
-        this.faceFailed = true
+        if (gen !== this.faceGen) return // a stale load for an old delegate or capture
+        console.warn(`[detection] face mesh unavailable on ${delegate}:`, err)
+        // a GPU failure gets one retry on the CPU; after that the head stays plain
+        if (delegate === 'GPU') this.faceGpuBroken = true
+        else this.faceFailed = true
       })
       .finally(() => {
         this.faceLoading = false
@@ -424,6 +462,7 @@ class DetectionController {
   }
 
   private releaseFace(): void {
+    this.faceGen++
     try {
       this.face?.close()
     } catch {
@@ -511,6 +550,11 @@ class DetectionController {
       this.landmarker = null
       this.delegate = null
       this.releaseFace()
+      // a different delegate deserves a fresh chance at the preview extras
+      this.masksFailed = false
+      this.faceFailed = false
+      this.faceGpuBroken = false
+      useAppStore.setState({ meshUnavailable: false })
       if (this.wantRunning) void this.restart()
     }
   }

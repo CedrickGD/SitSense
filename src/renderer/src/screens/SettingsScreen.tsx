@@ -104,6 +104,12 @@ function OverlayColorPicker({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => setDraft(customColor), [customColor])
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), [])
+  /** a preset click must not be overridden by a custom pick still waiting to commit */
+  const pick = (c: OverlayColor): void => {
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = null
+    onChange({ color: c })
+  }
 
   const postureGradient = `conic-gradient(${[0, 1, 2, 3, 0].map((st) => STAGE_COLOR[st as 0 | 1 | 2 | 3]).join(', ')})`
   return (
@@ -112,7 +118,7 @@ function OverlayColorPicker({
         label="Posture — follows your stage colors"
         selected={color === 'posture'}
         background={postureGradient}
-        onClick={() => onChange({ color: 'posture' })}
+        onClick={() => pick('posture')}
       />
       <span className="mx-0.5 h-5 w-px bg-hairline" />
       {(Object.keys(OVERLAY_PRESETS) as OverlayPreset[]).map((p) => (
@@ -121,23 +127,25 @@ function OverlayColorPicker({
           label={PRESET_LABELS[p]}
           selected={color === p}
           background={OVERLAY_PRESETS[p]}
-          onClick={() => onChange({ color: p })}
+          onClick={() => pick(p)}
         />
       ))}
       <label
         title="Custom color"
         className={swatchClass(color === 'custom')}
         style={{ background: color === 'custom' ? draft : 'conic-gradient(#f66, #fd5, #6e8, #5cf, #a8f, #f6c, #f66)' }}
-        onClick={(e) => {
-          // the label forwards a second click to the input; only react to the user's own
-          if (e.target === e.currentTarget && color !== 'custom') onChange({ color: 'custom', customColor: draft })
-        }}
       >
         <input
           type="color"
           value={draft}
-          aria-label="Custom color"
+          aria-label={color === 'custom' ? 'Custom color (selected)' : 'Custom color'}
           className="sr-only"
+          // exactly one click reaches the input for a mouse click on the label
+          // and for Space/Enter on the focused input, so re-selecting the saved
+          // color works without having to pick a new one
+          onClick={() => {
+            if (color !== 'custom') onChange({ color: 'custom', customColor: draft })
+          }}
           onChange={(e) => {
             const next = e.target.value
             setDraft(next)

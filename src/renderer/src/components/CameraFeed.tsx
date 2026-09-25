@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type JSX } from 'react'
-import type { CameraError } from '@shared/posture'
+import type { CameraError, Stage } from '@shared/posture'
 import { DEFAULT_SETTINGS, OVERLAY_PRESETS, type OverlaySettings } from '@shared/settings'
 import { detectionController } from '@renderer/detection/controller'
 import { LM } from '@renderer/posture/constants'
@@ -17,13 +17,48 @@ function useOverlayColor(overlay: OverlaySettings): string {
   return OVERLAY_PRESETS[overlay.color]
 }
 
-function PoseOverlay({ landmarks, aspect, color }: { landmarks: Landmark[]; aspect: number; color: string }): JSX.Element {
+type BodyPart = 'head' | 'neck' | 'shoulders'
+
+/**
+ * With a fixed overlay hue the skeleton would say nothing about posture, so
+ * the part each active issue lives on takes that issue's stage color — the
+ * same mapping the mesh uses for its problem-area glow.
+ */
+function useProblemColors(overlay: OverlaySettings): Partial<Record<BodyPart, string>> {
+  const stages = useAppStore((s) => {
+    const snap = s.snapshot
+    if (overlay.color === 'posture' || !snap || snap.presence !== 'active') return '0,0,0'
+    const i = snap.issues
+    return `${Math.max(i.headForward.stage, i.tooClose.stage)},${i.sink.stage},${i.lean.stage}`
+  })
+  const [head, neck, shoulders] = stages.split(',').map((n) => Number(n) as Stage)
+  const out: Partial<Record<BodyPart, string>> = {}
+  if (head > 0) out.head = STAGE_COLOR[head]
+  if (neck > 0) out.neck = STAGE_COLOR[neck]
+  if (shoulders > 0) out.shoulders = STAGE_COLOR[shoulders]
+  return out
+}
+
+function PoseOverlay({
+  landmarks,
+  aspect,
+  color,
+  problems
+}: {
+  landmarks: Landmark[]
+  aspect: number
+  color: string
+  problems: Partial<Record<BodyPart, string>>
+}): JSX.Element {
+  const partColor = (part: BodyPart): string => problems[part] ?? color
+  const pointPart = (i: number): BodyPart =>
+    i === LM.leftShoulder || i === LM.rightShoulder ? 'shoulders' : 'head'
   // viewBox mirrors the video's intrinsic aspect and 'slice' crops exactly like
   // object-cover, so overlay points land on the pixels they were detected on
   const vw = 100
   const vh = 100 / (aspect || 4 / 3)
   const pts = [LM.nose, LM.leftEyeOuter, LM.rightEyeOuter, LM.leftEar, LM.rightEar, LM.leftShoulder, LM.rightShoulder]
-  const seg = (a: number, b: number): JSX.Element | null => {
+  const seg = (a: number, b: number, stroke: string): JSX.Element | null => {
     const pa = landmarks[a]
     const pb = landmarks[b]
     if (!pa || !pb || (pa.visibility ?? 0) < 0.5 || (pb.visibility ?? 0) < 0.5) return null
@@ -34,7 +69,7 @@ function PoseOverlay({ landmarks, aspect, color }: { landmarks: Landmark[]; aspe
         y1={pa.y * vh}
         x2={pb.x * vw}
         y2={pb.y * vh}
-        stroke={color}
+        stroke={stroke}
         strokeWidth={0.6}
         opacity={0.8}
       />
@@ -56,15 +91,15 @@ function PoseOverlay({ landmarks, aspect, color }: { landmarks: Landmark[]; aspe
       preserveAspectRatio="xMidYMid slice"
       className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100"
     >
-      {seg(LM.leftShoulder, LM.rightShoulder)}
-      {seg(LM.leftEar, LM.rightEar)}
+      {seg(LM.leftShoulder, LM.rightShoulder, partColor('shoulders'))}
+      {seg(LM.leftEar, LM.rightEar, partColor('head'))}
       {neckVisible && (
         <line
           x1={earMidX * vw}
           y1={earMidY * vh}
           x2={shMidX * vw}
           y2={shMidY * vh}
-          stroke={color}
+          stroke={partColor('neck')}
           strokeWidth={0.6}
           opacity={0.8}
         />
@@ -79,7 +114,7 @@ function PoseOverlay({ landmarks, aspect, color }: { landmarks: Landmark[]; aspe
             cx={p.x * vw}
             cy={p.y * vh}
             r={1.1}
-            fill={color}
+            fill={partColor(pointPart(i))}
             opacity={dim ? 0.35 : 0.85}
             strokeDasharray={dim ? '1 1' : undefined}
           />
@@ -145,6 +180,7 @@ export default function CameraFeed({ showAway = true, compact = false }: CameraF
   const overlaySettings = useAppStore((s) => s.settings?.overlay) ?? DEFAULT_SETTINGS.overlay
   const meshUnavailable = useAppStore((s) => s.meshUnavailable)
   const overlayColor = useOverlayColor(overlaySettings)
+  const problemColors = useProblemColors(overlaySettings)
 
   const wantsMesh = overlaySettings.style === 'mesh' || overlaySettings.style === 'hologram'
   const style = wantsMesh && meshUnavailable ? 'skeleton' : overlaySettings.style
@@ -207,7 +243,7 @@ export default function CameraFeed({ showAway = true, compact = false }: CameraF
           )}
           {showMesh && <MeshOverlay />}
           {style === 'skeleton' && overlay && !pause.paused && (
-            <PoseOverlay landmarks={overlay} aspect={aspect} color={overlayColor} />
+            <PoseOverlay landmarks={overlay} aspect={aspect} color={overlayColor} problems={problemColors} />
           )}
           {/* plumb line: the calibrated center, the app's alignment motif */}
           {!pause.paused && <div className="absolute inset-y-0 left-1/2 w-px bg-white/10" />}
