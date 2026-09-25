@@ -99,6 +99,7 @@ As built, a few more things happen before `ready`: an unpackaged run moves `user
   - `app.setAppUserModelId()` must match the electron-builder `appId` — Windows uses the AUMID to attribute the toast.
   - A Start-menu shortcut carrying that AUMID must exist for reliable delivery — the NSIS installer creates it (`createStartMenuShortcut: true`). This is why the **portable exe has degraded toast behavior** (§7).
 - `Notification.isSupported()` guard; `notification.on('click')` → show window.
+- As built: a fixed `app.setToastActivatorCLSID(...)` next to the AUMID, and `Notification.handleActivation` for clicks and the `Pause 15 min` button. With Electron's default random-per-run CLSID, a toast left in the Action Center can't reach the app after a restart. (Needs verifying on real Windows.)
 - Nag policy lives in main, not renderer: on transition to `bad` start a grace timer (`badPostureSeconds`, default 30 s); fire toast only after sustained bad posture; then a cooldown (`notifyCooldownSeconds`, default 300 s) before re-nagging; reset on recovery to `good`. Keeps renderer purely observational.
 
 ### Settings persistence (`main/settings-store.ts`)
@@ -131,7 +132,7 @@ app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath, args: [
 
 On boot: `process.argv.includes('--hidden')` → create window with `show: false` and skip `win.show()`. Guard: only offer/enable autostart when `app.isPackaged` (dev `electron.exe` path would be registered otherwise). Portable-exe caveat in §7.
 
-As built: the portable exe registers `PORTABLE_EXECUTABLE_FILE` (the exe the user launched), not `process.execPath` (its temp extraction dir, gone after exit). On boot, `reconcileAutostart` reads `executableWillLaunchAtLogin` and turns the setting off if the user disabled the entry in Task Manager, so the toggle never lies. The NSIS uninstaller deletes the `Run` / `StartupApproved\Run` values (named after the AUMID) unless it runs as part of an update (`build/installer.nsh`).
+As built: the portable exe registers `PORTABLE_EXECUTABLE_FILE` (the exe the user launched), not `process.execPath` (its temp extraction dir, gone after exit). On boot, `reconcileAutostart` follows Task Manager → Startup apps both ways via `executableWillLaunchAtLogin`: an entry switched off there turns the setting off (the entry stays, so it can be switched on again there), and one switched back on turns the setting on. The toggle never lies, and the app never deletes an entry the user can still see. The NSIS uninstaller deletes the `Run` / `StartupApproved\Run` values (named after the AUMID) unless it runs as part of an update (`build/installer.nsh`).
 
 ### Window lifecycle (`main/window.ts`)
 
@@ -158,7 +159,8 @@ app.on('before-quit', () => { isQuitting = true; });
 
 ### Pause and the lock screen (`main/pause.ts`)
 
-- Two reasons: `user` (tray, dashboard, toast action) and `lock`. Locking the session pauses and releases the camera; unlocking resumes, unless the user had paused anyway.
+- Two reasons: `user` (tray, dashboard, toast action) and `lock`. Locking the session pauses and releases the camera; unlocking resumes, unless the user had paused anyway. A timed pause that runs out while the session is locked hands over to the lock pause, so the camera only comes back on unlock.
+- The toast's `Pause 15 min` never shortens a pause that's already running (an old nudge clicked from the Action Center during "Until I resume" does nothing).
 - A user pause survives a restart (`userData/pause.json`, capped at 24 h) and is re-checked every 30 s, so a timed pause that expired while the machine slept ends on wake.
 - No `powerSaveBlocker`: an idle machine should be allowed to sleep, and `powerMonitor` `suspend` tells the renderer to drop its stream so it reacquires cleanly on resume.
 

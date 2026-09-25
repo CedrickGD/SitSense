@@ -137,11 +137,13 @@ export class PostureEngine {
   }
 
   /**
-   * Drops all episodes, smoothing and cooldowns — e.g. while the calibration
-   * wizard runs, so a half-built dwell against the old baseline can't fire.
+   * Drops all episodes and smoothing while the calibration wizard runs, so a
+   * half-built dwell against the old baseline can't fire. Quiet periods
+   * survive: visiting the wizard must not shorten the time between nudges.
    */
   resetEpisodes(): void {
-    this.resetTransientState(true)
+    this.resetTransientState(false)
+    for (const issue of ISSUES) this.machines[issue].interrupt()
   }
 
   updateSettings(settings: EngineSettings): void {

@@ -133,3 +133,24 @@ describe('EpisodeMachine — data loss and freezing', () => {
     expect(drive(m, { sevT: 1 }, 27_000, 31_200)).toHaveLength(1)
   })
 })
+
+describe('EpisodeMachine — interrupt (calibration wizard)', () => {
+  it('keeps the quiet period of a nudge that already fired', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    expect(drive(m, { sevT: 1 }, 0, 13_000)).toHaveLength(1) // nudged at ~12 s
+    m.interrupt() // wizard opened at 13 s
+    // still slouching after backing out: no repeat within the 120 s quiet period
+    expect(drive(m, { sevT: 1 }, 20_000, 132_900)).toEqual([])
+    const late = drive(m, { sevT: 1 }, 132_900, 134_000)
+    expect(late).toHaveLength(1)
+    expect(late[0].kind).toBe('initial')
+  })
+
+  it('leaves an idle machine free to nudge after a normal dwell', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    drive(m, { sevT: 1 }, 0, 5_000) // pending, never nudged
+    m.interrupt()
+    expect(drive(m, { sevT: 1 }, 5_000, 16_900)).toEqual([])
+    expect(drive(m, { sevT: 1 }, 16_900, 17_500)).toHaveLength(1)
+  })
+})

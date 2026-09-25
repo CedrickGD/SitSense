@@ -20,20 +20,23 @@ export function applyAutostart(settings: Settings): void {
 }
 
 /**
- * Boot-time sync: re-asserts the Run entry (it survives updates and moves of
- * the portable exe) — but if the user switched SitSense off under Task
- * Manager → Startup apps, respect that and return the setting to store
- * instead of silently re-enabling it.
+ * Boot-time sync with Task Manager → Startup apps, which can switch the entry
+ * off and on again behind the app's back. Returns the setting to store when
+ * the user changed it there; otherwise re-asserts the Run entry (it survives
+ * updates and moves of the portable exe).
  */
 export function reconcileAutostart(settings: Settings): Partial<GeneralSettings> | null {
   if (!app.isPackaged) return null
   const item = loginItem()
+  const current = app.getLoginItemSettings(item)
   if (settings.general.launchOnStartup) {
-    const current = app.getLoginItemSettings(item)
+    // switched off there: respect it instead of silently re-enabling
     if (current.openAtLogin && !current.executableWillLaunchAtLogin) return { launchOnStartup: false }
     app.setLoginItemSettings({ openAtLogin: true, ...item })
-  } else {
-    app.setLoginItemSettings({ openAtLogin: false, ...item })
+  } else if (current.openAtLogin) {
+    // switched back on there: adopt it. A still-disabled entry is left alone,
+    // so it stays in Task Manager for the user to turn on again.
+    if (current.executableWillLaunchAtLogin) return { launchOnStartup: true }
   }
   return null
 }

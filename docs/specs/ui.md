@@ -230,7 +230,7 @@ Each issue × stage has a pool of five phrasings (`src/main/notification-copy.ts
 
 - **Escalation variant** (worsening during quiet period) prefixes the body: `Still going —` e.g. *"Head's well past your shoulders — Still going — bring your ears back over them."* → implement as title from new stage + body `Still {stage-verb}. {fix}`.
 - **Recovery toast** (optional, off by default, max 1/hour): **Nicely recovered** — *Back to your baseline. Carry on.*
-- Every toast has one action button: `Pause 15 min`. Clicking the toast body opens the dashboard.
+- Every toast has one action button: `Pause 15 min` (it never shortens a longer pause that's already running). Clicking the toast body opens the dashboard.
 - Sound (if enabled): soft two-note marimba, low→high for slight/clear, a single lower tone for severe. Never plays twice within the quiet period.
 
 ---
@@ -247,6 +247,8 @@ All use the same `EmptyState` pattern, centered in the preview area: a 64px line
 | Away / out of frame | empty chair, dotted silhouette | **Looks like you stepped away** | Monitoring resumes the moment you're back in frame. Time away isn't counted against your day. | *(none — auto-recovers; tray goes to Away state after 30s out of frame)* |
 | Model failed to load | — | **Couldn't start posture detection** | The posture model failed to load on this machine. SitSense keeps retrying; reinstalling usually fixes a damaged install. | `Retry now` |
 | Calibration lost (camera moved) | tilted plumb line | **The view has changed** | Your camera angle no longer matches your baseline, so nudges are on hold until you recalibrate. | `Recalibrate` (a dashboard card plus a one-time toast; clears itself once the view is back in range) |
+
+A render error inside a screen shows `This screen hit a snag` with **Reload** instead of blanking the window (a per-screen error boundary, reset when you switch screens); detection runs outside React and keeps nudging meanwhile.
 
 The Windows settings buttons open fixed `ms-settings:` pages through an allowlist in main (`camera`, `camera-privacy`); the renderer can't open arbitrary URLs. In a narrow preview (minimum window size) the empty states shrink via a container query so their actions stay visible.
 

@@ -11,7 +11,7 @@ import {
   type Settings
 } from '@shared/settings'
 import { STAGE_COLOR } from '@renderer/lib/ui'
-import { useAppStore } from '@renderer/state/store'
+import { selectBaselineFromOtherCamera, useAppStore } from '@renderer/state/store'
 import CameraFeed from '@renderer/components/CameraFeed'
 import SpineGlyph from '@renderer/components/SpineGlyph'
 import { Button, SegmentedControl, Slider, Toggle } from '@renderer/components/primitives'
@@ -274,6 +274,7 @@ export default function SettingsScreen(): JSX.Element {
   const setRoute = useAppStore((s) => s.setRoute)
   const appVersion = useAppStore((s) => s.appVersion)
   const meshUnavailable = useAppStore((s) => s.meshUnavailable)
+  const cameraChanged = useAppStore(selectBaselineFromOtherCamera)
   const [fineTune, setFineTune] = useState(false)
   const [saved, setSaved] = useState<{ key: string; at: number } | null>(null)
 
@@ -287,8 +288,6 @@ export default function SettingsScreen(): JSX.Element {
     save(key, { issues: { [issue]: patch } })
   }
 
-  const baselineCamera = settings.calibration?.cameraDeviceId ?? null
-  const cameraChanged = !!settings.calibration && !!baselineCamera && !!activeCameraId && baselineCamera !== activeCameraId
   const activeCamera = cameras.find((c) => c.deviceId === activeCameraId)
 
   const resetAll = (): void => {

@@ -250,6 +250,9 @@ export function Menu({ label, trigger, triggerClassName = '', items, align = 'le
       e.preventDefault()
       close(true)
     } else if (e.key === 'Tab') {
+      // the menu lives at the end of <body>: hand focus back to the trigger so
+      // Tab continues from there instead of wrapping to the top of the page
+      triggerRef.current?.focus()
       close(false)
     } else if (e.key === 'ArrowDown') {
       e.preventDefault()

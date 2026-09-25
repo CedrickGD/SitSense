@@ -9,7 +9,7 @@ import {
   useMediaQuery,
   useNow
 } from '@renderer/lib/ui'
-import { useAppStore } from '@renderer/state/store'
+import { selectBaselineFromOtherCamera, useAppStore } from '@renderer/state/store'
 import CameraFeed from '@renderer/components/CameraFeed'
 import SpineGlyph from '@renderer/components/SpineGlyph'
 import { Button, Menu, StagePill, Toggle } from '@renderer/components/primitives'
@@ -84,10 +84,7 @@ function StatusColumn(): JSX.Element {
   const setRoute = useAppStore((s) => s.setRoute)
   const condition = useCondition()
   const short = useMediaQuery('(max-height: 680px)')
-  const cameraChanged = useAppStore((s) => {
-    const baselineCam = s.settings?.calibration?.cameraDeviceId
-    return !!baselineCam && !!s.activeCameraId && baselineCam !== s.activeCameraId
-  })
+  const cameraChanged = useAppStore(selectBaselineFromOtherCamera)
 
   // "47 min in good posture": remember when the current good stretch began
   const isGood = condition === 'good'
@@ -130,7 +127,12 @@ function StatusColumn(): JSX.Element {
         direction={worst?.issue === 'lean' ? snapshot?.issues.lean.direction : undefined}
         mode={condition === 'paused' ? 'paused' : watching ? 'normal' : 'away'}
       />
-      <div className="text-center" aria-live="polite">
+      {/* announce the state, not the per-second counters shown below it */}
+      <span className="sr-only" aria-live="polite">
+        {statusWord[condition]}
+        {worst ? `, ${STAGE_LABEL[worst.stage]}` : ''}
+      </span>
+      <div className="text-center">
         <h1
           className={`font-display leading-tight font-semibold tracking-tight text-text ${short ? 'text-[26px]' : 'text-[34px]'}`}
         >
@@ -296,6 +298,9 @@ function TodayStrip(): JSX.Element {
     )
   }
   const span = Math.max(1, derived.last - derived.first + 1)
+  // the reload every 30 s can merge runs (the current minute's state settles),
+  // so a remembered index may point past the end
+  const focusedRun = focus ? derived.runs[focus.run] : undefined
   const runAt = (clientX: number): { run: number; x: number } | null => {
     const rect = barRef.current?.getBoundingClientRect()
     if (!rect || rect.width === 0) return null
@@ -313,7 +318,7 @@ function TodayStrip(): JSX.Element {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return
     e.preventDefault()
     const last = derived.runs.length - 1
-    const cur = focus?.run ?? (e.key === 'ArrowLeft' ? last + 1 : -1)
+    const cur = focusedRun ? focus!.run : e.key === 'ArrowLeft' ? last + 1 : -1
     const next =
       e.key === 'Home' ? 0 : e.key === 'End' ? last : Math.min(last, Math.max(0, cur + (e.key === 'ArrowRight' ? 1 : -1)))
     setFocus({ run: next, x: centerOf(next) })
@@ -361,18 +366,18 @@ function TodayStrip(): JSX.Element {
             />
           ))}
         </div>
-        {focus && (
+        {focusedRun && focus && (
           <div
             className="pointer-events-none absolute bottom-full mb-1.5 -translate-x-1/2 rounded-md bg-card px-2 py-1 font-mono text-xs whitespace-nowrap text-text shadow-lg ring-1 ring-white/10"
             style={{
               left: Math.min(Math.max(focus.x, 90), (barRef.current?.clientWidth ?? 0) - 90)
             }}
           >
-            {runText(derived.runs[focus.run])}
+            {runText(focusedRun)}
           </div>
         )}
         <span className="sr-only" aria-live="polite">
-          {focus ? runText(derived.runs[focus.run]) : ''}
+          {focusedRun ? runText(focusedRun) : ''}
         </span>
         <div className="mt-1 flex justify-between font-mono text-[11px] text-text-faint">
           <span>{formatClock(derived.first)}</span>

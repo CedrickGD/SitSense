@@ -14,6 +14,8 @@ const MAX_PAUSE_MINUTES = 24 * 60
 let paused = false
 let resumeAt: number | null = null
 let reason: PauseReason | null = null
+/** the session is locked — nothing may turn the camera on until it unlocks */
+let locked = false
 let resumeTimer: NodeJS.Timeout | null = null
 const listeners = new Set<Listener>()
 
@@ -32,10 +34,12 @@ export function setPause(nextPaused: boolean, minutes: number | null = null): Pa
 
 /** Locking the session releases the camera; unlocking brings it back — unless the user had paused. */
 export function pauseForLock(): void {
+  locked = true
   if (!paused) apply(true, null, 'lock')
 }
 
 export function resumeAfterUnlock(): void {
+  locked = false
   if (paused && reason === 'lock') apply(false, null, 'lock')
 }
 
@@ -76,7 +80,11 @@ export function onPauseChanged(l: Listener): () => void {
  * to honor the wall-clock deadline the UI shows.
  */
 export function reconcilePause(): void {
-  if (paused && resumeAt !== null && Date.now() >= resumeAt) apply(false, null, 'user')
+  if (!paused || resumeAt === null || Date.now() < resumeAt) return
+  // a timed pause that runs out behind the lock screen hands over to the lock
+  // pause, so unlocking (not the timer) brings the camera back
+  if (locked) apply(true, null, 'lock')
+  else apply(false, null, 'user')
 }
 
 /**

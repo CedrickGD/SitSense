@@ -44,9 +44,19 @@ function toastIcon(name: string): string | undefined {
 export function initNotifications(): void {
   if (process.platform !== 'win32' || typeof Notification.handleActivation !== 'function') return
   Notification.handleActivation((details) => {
-    if (details.type === 'action') setPause(true, SNOOZE_MINUTES)
+    if (details.type === 'action') snooze()
     else showMainWindow()
   })
+}
+
+/**
+ * The toast's "Pause 15 min". An old nudge clicked from the Action Center
+ * must not shorten a longer pause — least of all "Until I resume".
+ */
+function snooze(): void {
+  const { paused, resumeAt } = getPauseState()
+  if (paused && (resumeAt === null || resumeAt >= Date.now() + SNOOZE_MINUTES * 60_000)) return
+  setPause(true, SNOOZE_MINUTES)
 }
 
 /**
@@ -79,7 +89,7 @@ export function fireAlert(alert: PostureAlert): void {
       groupId: 'posture',
       actions: [{ type: 'button', text: `Pause ${SNOOZE_MINUTES} min` }]
     },
-    { onAction: () => setPause(true, SNOOZE_MINUTES) }
+    { onAction: snooze }
   )
   if (n) nudges.set(alert.issue, n)
   recoveredSince.delete(alert.issue)

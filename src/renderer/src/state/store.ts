@@ -72,3 +72,15 @@ export const useAppStore = create<AppState>((set) => ({
     set({ settings })
   }
 }))
+
+/**
+ * The baseline came from a different camera than the one in use. Ids change
+ * when a webcam moves to another USB port, so a matching name counts as the
+ * same camera.
+ */
+export function selectBaselineFromOtherCamera(s: AppState): boolean {
+  const baseline = s.settings?.calibration
+  if (!baseline?.cameraDeviceId || !s.activeCameraId || baseline.cameraDeviceId === s.activeCameraId) return false
+  const activeLabel = s.cameras.find((c) => c.deviceId === s.activeCameraId)?.label
+  return !(baseline.cameraLabel && activeLabel && baseline.cameraLabel === activeLabel)
+}

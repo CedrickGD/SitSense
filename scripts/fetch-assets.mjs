@@ -31,10 +31,11 @@ const wasmSrc = join(root, 'node_modules/@mediapipe/tasks-vision/wasm')
 const wasmDest = join(root, 'src/renderer/public/mediapipe/wasm')
 const modelDir = join(root, 'src/renderer/public/models')
 
-// FilesetResolver only ever picks the SIMD, non-module build in Chromium; the
-// module and no-SIMD variants would add ~23 MB of dead weight to the installer
-const WASM_FILES = ['vision_wasm_internal.js', 'vision_wasm_internal.wasm']
-const UNUSED_WASM = ['module', 'nosimd'].flatMap((v) => [`vision_wasm_${v}_internal.js`, `vision_wasm_${v}_internal.wasm`])
+// FilesetResolver picks the SIMD build, or the no-SIMD one on CPUs without
+// SSE4.1 (V8 has no Wasm SIMD there). The ES-module variant is never loaded
+// (forVisionTasks is called without useModule) — 12 MB of dead weight.
+const WASM_FILES = ['', '_nosimd'].flatMap((v) => [`vision_wasm${v}_internal.js`, `vision_wasm${v}_internal.wasm`])
+const UNUSED_WASM = ['vision_wasm_module_internal.js', 'vision_wasm_module_internal.wasm']
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex')
 

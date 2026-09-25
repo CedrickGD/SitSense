@@ -66,6 +66,8 @@ export interface CalibrationCapabilities {
 export interface CalibrationBaseline {
   capturedAt: number
   cameraDeviceId: string | null
+  /** the camera's name — its id changes when a webcam moves to another USB port */
+  cameraLabel?: string | null
   capabilities: CalibrationCapabilities
   /** raw scales at calibration (normalized image units) */
   sSh0: number | null

@@ -68,6 +68,18 @@ export class EpisodeMachine {
     this.cfg = cfg
   }
 
+  /**
+   * Ends the episode from outside (the calibration wizard opened) like a
+   * data-loss reset: an episode that already nudged starts its quiet period,
+   * so coming back can't repeat the same toast straight away.
+   */
+  interrupt(): void {
+    if ((this.phaseInternal === 'alerted' || this.phaseInternal === 'recovering') && this.lastT !== null) {
+      this.startCooldown(this.lastT)
+    }
+    this.reset(false)
+  }
+
   /** Hard reset (issue disabled, calibration, or a long away break). */
   reset(clearCooldown: boolean): void {
     this.toIdle()

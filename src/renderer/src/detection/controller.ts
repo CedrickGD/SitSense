@@ -1,5 +1,5 @@
 import type { FaceLandmarker, PoseLandmarker, PoseLandmarkerResult } from '@mediapipe/tasks-vision'
-import type { DetectionStatus, PostureSnapshot } from '@shared/posture'
+import type { CalibrationBaseline, DetectionStatus, PostureSnapshot } from '@shared/posture'
 import { PRESET_FPS, type Settings } from '@shared/settings'
 import { BodyMeshBuilder, type BodyMesh, type FaceInput } from '@renderer/overlay/bodyMesh'
 import { CalibrationSession, assessPlacement } from '@renderer/posture/calibration'
@@ -35,6 +35,10 @@ type CalibrationPhase = ReturnType<typeof useAppStore.getState>['calibration']['
 const calibrating = (phase: CalibrationPhase): boolean =>
   phase === 'positioning' || phase === 'countdown' || phase === 'capturing'
 
+/** The baseline's numbers — which camera it names doesn't change what posture looks like. */
+const baselineKey = (c: CalibrationBaseline | null | undefined): string =>
+  JSON.stringify(c ? { ...c, cameraDeviceId: null, cameraLabel: null } : null)
+
 /**
  * Owns the camera stream, the MediaPipe landmarker, the frame loop, and the
  * posture engine; bridges their results into the zustand store and main-process
@@ -44,6 +48,7 @@ class DetectionController {
   private video: HTMLVideoElement | null = null
   private stream: MediaStream | null = null
   private activeCameraId: string | null = null
+  private activeCameraLabel: string | null = null
   private pose: VisionTask<PoseLandmarker> | null = null
   private loop: FrameLoop | null = null
   private engine: PostureEngine | null = null
@@ -156,6 +161,10 @@ class DetectionController {
 
   private setWindowVisible(visible: boolean): void {
     this.visibilityKnown = true
+    // a wizard left open in the tray would silence every nudge for the rest of
+    // the session — leave it (a first run keeps it: nothing to nudge against yet)
+    const state = useAppStore.getState()
+    if (!visible && state.calibration.phase === 'positioning' && state.settings?.calibration) state.setRoute('dashboard')
     this.applyVisibility(visible)
     // the store isn't fed while hidden — catch the dashboard up on show
     useAppStore.setState({ windowVisible: visible, ...(visible ? { snapshot: this.latestSnapshot } : {}) })
@@ -347,14 +356,26 @@ class DetectionController {
     if (back) void this.restart()
   }
 
-  /** Tracks the camera actually in use; re-points a stale saved id found again by its label. */
+  /**
+   * Tracks the camera actually in use; re-points a stale saved id found again
+   * by its label, and teaches older baselines the name of their camera.
+   */
   private noteActiveCamera(deviceId: string | null, label: string | null): void {
     this.activeCameraId = deviceId
+    this.activeCameraLabel = label
     useAppStore.setState({ activeCameraId: deviceId })
     const s = this.settings
-    if (s?.cameraDeviceId && deviceId && deviceId !== s.cameraDeviceId && label && label === s.cameraLabel) {
-      void window.sitsense.setSettings({ cameraDeviceId: deviceId })
+    if (!s || !deviceId || !label) return
+    const cal = s.calibration
+    const staleId = s.cameraDeviceId && deviceId !== s.cameraDeviceId && label === s.cameraLabel ? s.cameraDeviceId : null
+    const patch: Partial<Settings> = {}
+    if (staleId) patch.cameraDeviceId = deviceId
+    if (cal && (cal.cameraDeviceId === deviceId || (staleId && cal.cameraDeviceId === staleId))) {
+      if (cal.cameraDeviceId !== deviceId || !cal.cameraLabel) {
+        patch.calibration = { ...cal, cameraDeviceId: deviceId, cameraLabel: cal.cameraLabel || label }
+      }
     }
+    if (Object.keys(patch).length > 0) void window.sitsense.setSettings(patch)
   }
 
   // ---------- delegate choice ----------
@@ -469,7 +490,8 @@ class DetectionController {
     this.endCalibration()
     const result = session.finish(Date.now(), this.activeCameraId ?? this.settings?.cameraDeviceId ?? null)
     if (result.ok) {
-      void useAppStore.getState().patchSettings({ calibration: result.baseline })
+      const baseline = { ...result.baseline, cameraLabel: this.activeCameraLabel }
+      void useAppStore.getState().patchSettings({ calibration: baseline })
       useAppStore.setState((s) => ({ calibration: { ...s.calibration, phase: 'done', banner: null } }))
     } else {
       useAppStore.setState((s) => ({
@@ -751,7 +773,8 @@ class DetectionController {
     if (!this.engine) return
 
     this.engine.updateSettings(toEngineSettings(next))
-    if (JSON.stringify(prev?.calibration ?? null) !== JSON.stringify(next.calibration ?? null)) {
+    // re-pointing the baseline's camera id or name must not reset every episode
+    if (baselineKey(prev?.calibration) !== baselineKey(next.calibration)) {
       this.engine.setBaseline(next.calibration)
     }
     // a stale id re-pointed to the camera already open needs no restart

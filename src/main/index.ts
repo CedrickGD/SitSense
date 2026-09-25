@@ -13,6 +13,10 @@ import { createMainWindow, markQuitting, sendToRenderer, showMainWindow } from '
 
 // AUMID must match electron-builder appId — Windows attributes toasts through it.
 app.setAppUserModelId('com.cedrickgd.sitsense')
+// A fixed toast activator: with Electron's default (a new random CLSID per
+// run), clicking a toast left in the Action Center from an earlier run — or
+// its "Pause 15 min" button — can't reach this process.
+if (process.platform === 'win32') app.setToastActivatorCLSID('{5B1D3C7E-2A94-4F6B-9E08-7C3A51D2E6F4}')
 
 // a development run must not share the installed app's settings, stats or
 // single-instance lock (the tray copy would swallow every `npm run dev`)
