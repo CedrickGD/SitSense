@@ -1,4 +1,5 @@
-// Generates the tray ICOs (resources/tray/*.ico) and the app icon (build/icon.ico)
+// Generates the tray ICOs (resources/tray/*.ico), the toast logos
+// (resources/toast/*.png) and the app icon (build/icon.ico)
 // with zero dependencies: shapes are rasterized via signed-distance fields and
 // wrapped as PNG-compressed ICO entries (supported since Vista).
 // The 3-segment "spine" glyph encodes posture state by SHAPE as well as color,
@@ -16,6 +17,7 @@ const BADGE = [0x25, 0x21, 0x19]
 const HAIRLINE = [0x4a, 0x44, 0x3a]
 const SAGE = [0x93, 0xc9, 0xa2]
 const AMBER = [0xe5, 0xb9, 0x6b]
+const EMBER = [0xe0, 0x8a, 0x56]
 const CORAL = [0xe0, 0x65, 0x5c]
 const SLATE = [0x8f, 0xa3, 0xb8]
 const FAINT = [0x8a, 0x83, 0x76]
@@ -189,3 +191,63 @@ mkdirSync(join(root, 'build'), { recursive: true })
 const appIco = encodeIco(APP_SIZES.map((size) => ({ size, png: encodePng(raster(size, appShapes), size, size) })))
 writeFileSync(join(root, 'build/icon.ico'), appIco)
 console.log(`[gen-icons] build/icon.ico (${appIco.length} bytes)`)
+
+// toast logos: the dashboard's 5-segment spine glyph (SpineGlyph.tsx), bent the
+// way each issue bends it and colored by stage — so consecutive nudges look
+// different at a glance, not just read differently
+const STAGE_COLORS = { 1: AMBER, 2: EMBER, 3: CORAL }
+const SEG_Y = [8, 26, 44, 62, 80]
+const SINK_CURVE = [6, 3, 0, -3, -5]
+
+function glyphShapes(issue, stage, color) {
+  const k = stage / 3
+  const unit = 0.8 / 96 // glyph viewBox units → icon units
+  return SEG_Y.map((y, i) => {
+    let x = 25
+    let yy = y
+    if (issue === 'sink') {
+      x += SINK_CURVE[i] * k
+      yy = 80 - (80 - y) * (1 - 0.22 * k)
+    } else if (issue === 'headForward' && i < 2) {
+      x += (i === 0 ? 9 : 4.5) * k
+    }
+    let cx = x + 7
+    let cy = yy + 6
+    if (issue === 'lean') {
+      const a = ((16 * k) * Math.PI) / 180
+      const dx = cx - 32
+      const dy = cy - 88
+      cx = 32 + dx * Math.cos(a) - dy * Math.sin(a)
+      cy = 88 + dx * Math.sin(a) + dy * Math.cos(a)
+    } else if (issue === 'tooClose') {
+      const f = 1 + 0.14 * k
+      cx = 32 + (cx - 32) * f
+      cy = 88 + (cy - 88) * f
+    }
+    const grow = issue === 'tooClose' ? 1 + 0.14 * k : 1
+    return {
+      kind: 'roundRect',
+      cx: 0.5 + (cx - 32) * unit,
+      cy: 0.5 + (cy - 50) * unit,
+      hw: 7 * grow * unit,
+      hh: 6 * grow * unit,
+      rr: 6 * grow * unit,
+      color
+    }
+  })
+}
+
+const TOAST_SIZE = 96
+const toastDir = join(root, 'resources/toast')
+mkdirSync(toastDir, { recursive: true })
+const toastIcons = { good: [...badge(), ...glyphShapes(null, 0, SAGE)] }
+for (const issue of ['sink', 'headForward', 'lean', 'tooClose']) {
+  for (const stage of [1, 2, 3]) {
+    toastIcons[`${issue}-${stage}`] = [...badge(), ...glyphShapes(issue, stage, STAGE_COLORS[stage])]
+  }
+}
+for (const [name, shapes] of Object.entries(toastIcons)) {
+  const png = encodePng(raster(TOAST_SIZE, shapes), TOAST_SIZE, TOAST_SIZE)
+  writeFileSync(join(toastDir, `${name}.png`), png)
+}
+console.log(`[gen-icons] ${Object.keys(toastIcons).length} toast logos -> resources/toast/`)

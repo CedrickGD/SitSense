@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { app, Menu, nativeImage, Tray } from 'electron'
+import { Menu, nativeImage, Tray } from 'electron'
 import {
   ISSUE_LABELS,
   type PostureSnapshot,
@@ -7,6 +7,7 @@ import {
 } from '../shared/posture'
 import { stageLabel } from './notifications'
 import { getPauseState } from './pause'
+import { resourcesDir } from './resources'
 
 export interface TrayCallbacks {
   onOpen: () => void
@@ -26,12 +27,6 @@ let lastUpdateAt = 0
 let currentState: TrayState = 'off'
 let staleTimer: NodeJS.Timeout | null = null
 let countdownTimer: NodeJS.Timeout | null = null
-
-function resourcesDir(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, 'app.asar.unpacked', 'resources')
-    : join(app.getAppPath(), 'resources')
-}
 
 const ICON_FILES: Record<TrayState, string> = {
   good: 'tray-good.ico',

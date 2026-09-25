@@ -71,6 +71,12 @@ body {
   }
 }
 
+/* hologram preview style: faint CRT scanlines over the darkened feed */
+.hologram-scanlines {
+  background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.045) 0 1px, transparent 1px 3px);
+  mix-blend-mode: screen;
+}
+
 /* range input thumb in sage */
 .slider-sage::-webkit-slider-thumb {
   appearance: none;

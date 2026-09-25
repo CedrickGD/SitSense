@@ -27,6 +27,32 @@ export interface NotificationSettings {
   sound: boolean
 }
 
+/** How the live preview draws what the pose model sees. */
+export type OverlayStyle = 'mesh' | 'hologram' | 'skeleton' | 'off'
+
+export const OVERLAY_STYLES: readonly OverlayStyle[] = ['mesh', 'hologram', 'skeleton', 'off']
+
+/** Fixed overlay hues; 'posture' follows the stage colors, 'custom' uses customColor. */
+export const OVERLAY_PRESETS = {
+  ice: '#cfe6ff',
+  cyan: '#44d7f0',
+  violet: '#a58bff',
+  magenta: '#f266c8',
+  lime: '#b6ec5c',
+  gold: '#f5c65b',
+  white: '#f4f0e8'
+} as const
+
+export type OverlayPreset = keyof typeof OVERLAY_PRESETS
+export type OverlayColor = 'posture' | OverlayPreset | 'custom'
+
+export interface OverlaySettings {
+  style: OverlayStyle
+  color: OverlayColor
+  /** #rrggbb, used when color === 'custom' */
+  customColor: string
+}
+
 export interface GeneralSettings {
   launchOnStartup: boolean
   startHidden: boolean
@@ -43,6 +69,7 @@ export interface Settings {
   issues: Record<IssueId, IssueSettings>
   notifications: NotificationSettings
   general: GeneralSettings
+  overlay: OverlaySettings
   calibration: CalibrationBaseline | null
   /** user has seen the close-to-tray coach mark */
   onboarded: boolean
@@ -77,6 +104,11 @@ export const DEFAULT_SETTINGS: Settings = {
     startHidden: false,
     hidePreview: false
   },
+  overlay: {
+    style: 'mesh',
+    color: 'posture',
+    customColor: '#44d7f0'
+  },
   calibration: null,
   onboarded: false
 }
@@ -92,6 +124,7 @@ export function mergeSettings(persisted: unknown): Settings {
     issues: { ...base.issues },
     notifications: { ...base.notifications, ...(p.notifications ?? {}) },
     general: { ...base.general, ...(p.general ?? {}) },
+    overlay: { ...base.overlay, ...(p.overlay ?? {}) },
     calibration: p.calibration ?? null
   }
   for (const id of Object.keys(base.issues) as IssueId[]) {
@@ -106,5 +139,12 @@ export function mergeSettings(persisted: unknown): Settings {
   if (!(out.performancePreset in PRESET_FPS)) out.performancePreset = 'balanced'
   if (!['auto', 'GPU', 'CPU'].includes(out.delegate)) out.delegate = 'auto'
   if (out.resolvedDelegate !== 'GPU' && out.resolvedDelegate !== 'CPU') out.resolvedDelegate = null
+  if (!OVERLAY_STYLES.includes(out.overlay.style)) out.overlay.style = base.overlay.style
+  if (out.overlay.color !== 'posture' && out.overlay.color !== 'custom' && !Object.hasOwn(OVERLAY_PRESETS, out.overlay.color)) {
+    out.overlay.color = base.overlay.color
+  }
+  if (typeof out.overlay.customColor !== 'string' || !/^#[0-9a-f]{6}$/i.test(out.overlay.customColor)) {
+    out.overlay.customColor = base.overlay.customColor
+  }
   return out
 }

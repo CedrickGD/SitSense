@@ -7,7 +7,7 @@ import { getPauseState, setPause } from './pause'
 import { getSettings, updateSettings } from './settings-store'
 import { getTodayStats, statsPostureUpdate } from './stats'
 import { refreshTray, trayPostureUpdate } from './tray'
-import { getMainWindow, markQuitting, sendToRenderer } from './window'
+import { getMainWindow, isMainWindowVisible, markQuitting, sendToRenderer } from './window'
 
 let lastDetectionStatus: DetectionStatus | null = null
 
@@ -27,7 +27,12 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle(IPC.appGetStatus, (): AppStatus => {
-    return { version: app.getVersion(), pause: getPauseState(), packaged: app.isPackaged }
+    return {
+      version: app.getVersion(),
+      pause: getPauseState(),
+      packaged: app.isPackaged,
+      windowVisible: isMainWindowVisible()
+    }
   })
 
   ipcMain.handle(IPC.statsGetToday, () => getTodayStats())

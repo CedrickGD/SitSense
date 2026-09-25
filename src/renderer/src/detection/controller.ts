@@ -1,6 +1,7 @@
-import type { PoseLandmarker } from '@mediapipe/tasks-vision'
+import type { FaceLandmarker, PoseLandmarker, PoseLandmarkerResult } from '@mediapipe/tasks-vision'
 import type { DetectionStatus, PostureSnapshot } from '@shared/posture'
 import { PRESET_FPS, type Settings } from '@shared/settings'
+import { BodyMeshBuilder, type BodyMesh, type FaceInput } from '@renderer/overlay/bodyMesh'
 import { CalibrationSession, assessPlacement } from '@renderer/posture/calibration'
 import { CAL_COUNTDOWN_S } from '@renderer/posture/constants'
 import { PostureEngine, type EngineSettings } from '@renderer/posture/engine'
@@ -8,7 +9,7 @@ import type { Frame } from '@renderer/posture/types'
 import { useAppStore } from '@renderer/state/store'
 import { CameraOpenError, listCameras, openCamera, stopStream } from './camera'
 import { FrameLoop } from './frame-loop'
-import { createLandmarker, recreateAsCpu } from './landmarker'
+import { createFaceLandmarker, createLandmarker, faceMeshTopology, recreateAsCpu } from './landmarker'
 
 const SNAPSHOT_MIN_INTERVAL_MS = 1000
 const FPS_WINDOW_MS = 2000
@@ -28,6 +29,25 @@ class DetectionController {
   private loop: FrameLoop | null = null
   private engine: PostureEngine | null = null
   private settings: Settings | null = null
+
+  /** preview components currently drawing the body mesh */
+  private meshConsumers = 0
+  private windowVisible = true
+  /** a visibility event already arrived — newer than the status snapshot */
+  private visibilityKnown = false
+  /** the landmarker currently emits segmentation masks */
+  private masksOn = false
+  private masksFailed = false
+  private meshBuilder = new BodyMeshBuilder()
+  /** face mesh for the wireframe's face — alive only while masks are on */
+  private face: FaceLandmarker | null = null
+  private faceLoading = false
+  private faceGpuBroken = false
+  private faceFailed = false
+  /** how long the last frame took, all models included */
+  private frameCostMs = 0
+  /** whether this calibration capture can afford the face model (decided once per capture) */
+  private faceDuringCapture = true
 
   private session: CalibrationSession | null = null
   private countdownTimer: ReturnType<typeof setInterval> | null = null
@@ -52,13 +72,25 @@ class DetectionController {
   }
 
   async init(): Promise<void> {
+    // listen before asking: the window may be shown while the status request is in flight
+    window.sitsense.onWindowVisibility((visible) => {
+      this.visibilityKnown = true
+      this.windowVisible = visible
+      useAppStore.setState({ windowVisible: visible })
+    })
     const [settings, appStatus] = await Promise.all([
       window.sitsense.getSettings(),
       window.sitsense.getAppStatus()
     ])
     this.settings = settings
     this.engine = new PostureEngine(settings.calibration, toEngineSettings(settings))
-    useAppStore.setState({ settings, pause: appStatus.pause, appVersion: appStatus.version })
+    if (!this.visibilityKnown) this.windowVisible = appStatus.windowVisible
+    useAppStore.setState({
+      settings,
+      pause: appStatus.pause,
+      appVersion: appStatus.version,
+      windowVisible: this.windowVisible
+    })
 
     this.video = document.createElement('video')
     this.video.muted = true
@@ -90,6 +122,25 @@ class DetectionController {
     })
 
     if (!appStatus.pause.paused) await this.start()
+  }
+
+  /**
+   * A preview wants the body mesh. Segmentation costs extra work per frame, so
+   * it only runs while at least one mesh preview is mounted AND the window is
+   * on screen — never while SitSense sits in the tray.
+   */
+  acquireMesh(): () => void {
+    this.meshConsumers++
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.meshConsumers--
+    }
+  }
+
+  private wantsMasks(): boolean {
+    return this.meshConsumers > 0 && this.windowVisible && !this.masksFailed
   }
 
   /** The stream for preview <video> elements (shared MediaStream is fine). */
@@ -131,6 +182,7 @@ class DetectionController {
         const created = await createLandmarker(pref)
         this.landmarker = created.landmarker
         this.delegate = created.delegate
+        this.masksOn = false
         this.firstInferenceOk = false
         if (this.settings.resolvedDelegate !== created.delegate) {
           void window.sitsense.setSettings({ resolvedDelegate: created.delegate })
@@ -179,7 +231,9 @@ class DetectionController {
     stopStream(this.stream)
     this.stream = null
     if (this.video) this.video.srcObject = null
-    useAppStore.setState({ overlay: null })
+    this.meshBuilder.reset()
+    this.releaseFace()
+    useAppStore.setState({ overlay: null, mesh: null })
     this.updateStatus({ running: false, measuredFps: 0 })
   }
 
@@ -220,7 +274,11 @@ class DetectionController {
     this.session = new CalibrationSession(performance.now())
     // the 5s capture needs ≥ ~45 samples for a solid median — temporarily lift
     // the frame rate above the power-saving preset (restored on finish/cancel)
-    this.loop?.setFps(Math.max(PRESET_FPS.balanced, this.currentFps()))
+    const captureFps = Math.max(PRESET_FPS.balanced, this.currentFps())
+    this.loop?.setFps(captureFps)
+    // a machine that can't fit the cosmetic face mesh into the capture frame
+    // rate drops it for these few seconds rather than starve the baseline
+    this.faceDuringCapture = this.frameCostMs < 0.6 * (1000 / captureFps)
     useAppStore.setState((s) => ({ calibration: { ...s.calibration, phase: 'capturing', progress: 0 } }))
   }
 
@@ -261,18 +319,32 @@ class DetectionController {
 
   private async processFrame(): Promise<void> {
     if (!this.landmarker || !this.video || !this.engine) return
+    await this.syncMasks()
     const t = performance.now()
+    try {
+      await this.processDetections(t)
+    } finally {
+      this.frameCostMs = performance.now() - t
+    }
+  }
+
+  private async processDetections(t: number): Promise<void> {
+    if (!this.landmarker || !this.video || !this.engine) return
 
     let frame: Frame = null
+    let mesh: BodyMesh | null = null
+    let result: PoseLandmarkerResult | null = null
     try {
-      const result = this.landmarker.detectForVideo(this.video, t)
+      result = this.landmarker.detectForVideo(this.video, t)
       frame = (result.landmarks?.[0] as Frame) ?? null
       this.firstInferenceOk = true
+      if (this.masksOn) mesh = this.buildMesh(result, frame, t)
     } catch (err) {
       if (!this.firstInferenceOk && this.delegate === 'GPU') {
         // some GPU failures only surface at the first inference
         console.warn('[detection] first GPU inference failed, recreating as CPU:', err)
         this.landmarker = await recreateAsCpu(this.landmarker)
+        this.masksOn = false
         this.delegate = 'CPU'
         void window.sitsense.setSettings({ resolvedDelegate: 'CPU' })
         this.updateStatus({ delegate: 'CPU' })
@@ -280,9 +352,12 @@ class DetectionController {
       }
       console.error('[detection] inference failed:', err)
       return
+    } finally {
+      // masks are copies owned by us (no callback was passed) — free them every frame
+      result?.close()
     }
 
-    useAppStore.setState({ overlay: frame ? [...frame] : null })
+    useAppStore.setState({ overlay: frame ? [...frame] : null, mesh })
     this.trackFps(t)
 
     const cal = useAppStore.getState().calibration
@@ -307,6 +382,87 @@ class DetectionController {
     useAppStore.setState({ snapshot })
     for (const alert of alerts) window.sitsense.sendAlert(alert)
     this.maybeSendSnapshot(snapshot, t)
+  }
+
+  /** Switches segmentation output on/off to match whether anyone can see the mesh. */
+  private async syncMasks(): Promise<void> {
+    const want = this.wantsMasks()
+    if (want && this.masksOn) this.ensureFace()
+    if (!this.landmarker || want === this.masksOn) return
+    try {
+      await this.landmarker.setOptions({ outputSegmentationMasks: want })
+      this.masksOn = want
+    } catch (err) {
+      console.warn('[detection] segmentation unavailable — mesh preview falls back to the skeleton:', err)
+      this.masksFailed = true
+      this.masksOn = false
+      useAppStore.setState({ meshUnavailable: true })
+    }
+    if (!this.masksOn) {
+      this.meshBuilder.reset()
+      this.releaseFace()
+      useAppStore.setState({ mesh: null })
+    }
+  }
+
+  /** Loads the face landmarker in the background; the mesh uses a plain head until it's ready. */
+  private ensureFace(): void {
+    if (this.face || this.faceLoading || this.faceFailed || !this.delegate) return
+    this.faceLoading = true
+    createFaceLandmarker(this.delegate === 'GPU' && !this.faceGpuBroken ? 'GPU' : 'CPU')
+      .then((face) => {
+        if (this.masksOn) this.face = face
+        else face.close() // the preview went away while it loaded
+      })
+      .catch((err) => {
+        console.warn('[detection] face mesh unavailable — the wireframe keeps a plain head:', err)
+        this.faceFailed = true
+      })
+      .finally(() => {
+        this.faceLoading = false
+      })
+  }
+
+  private releaseFace(): void {
+    try {
+      this.face?.close()
+    } catch {
+      // closing a broken task is best-effort
+    }
+    this.face = null
+  }
+
+  private detectFace(t: number): FaceInput | null {
+    if (!this.face || !this.video) return null
+    if (this.session && !this.faceDuringCapture) return null
+    try {
+      const points = this.face.detectForVideo(this.video, t).faceLandmarks?.[0]
+      return points ? { points, topology: faceMeshTopology() } : null
+    } catch (err) {
+      // GPU trouble gets one retry on the CPU; after that the head stays plain
+      console.warn('[detection] face mesh inference failed:', err)
+      if (this.delegate === 'GPU' && !this.faceGpuBroken) this.faceGpuBroken = true
+      else this.faceFailed = true
+      this.releaseFace()
+      return null
+    }
+  }
+
+  private buildMesh(result: PoseLandmarkerResult, frame: Frame, t: number): BodyMesh | null {
+    const mask = result.segmentationMasks?.[0]
+    if (!mask || !frame) {
+      this.meshBuilder.reset()
+      return null
+    }
+    try {
+      return this.meshBuilder.update(mask.getAsFloat32Array(), mask.width, mask.height, frame, t, this.detectFace(t))
+    } catch (err) {
+      // purely cosmetic — never let it take posture detection down with it
+      console.warn('[detection] body mesh failed — falling back to the skeleton:', err)
+      this.masksFailed = true
+      useAppStore.setState({ meshUnavailable: true })
+      return null
+    }
   }
 
   private maybeSendSnapshot(snapshot: PostureSnapshot, t: number): void {
@@ -350,10 +506,11 @@ class DetectionController {
       this.updateStatus({ targetFps: fps })
     }
     if (prev && prev.delegate !== next.delegate) {
-      // delegate preference changed: rebuild the landmarker on next start
+      // delegate preference changed: rebuild the landmarkers on next start
       this.landmarker?.close()
       this.landmarker = null
       this.delegate = null
+      this.releaseFace()
       if (this.wantRunning) void this.restart()
     }
   }

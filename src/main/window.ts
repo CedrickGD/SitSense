@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import { app, BrowserWindow, shell } from 'electron'
+import { IPC } from '../shared/ipc'
 
 let mainWindow: BrowserWindow | null = null
 let quitting = false
@@ -18,6 +19,11 @@ export function showMainWindow(): void {
   if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.show()
   mainWindow.focus()
+}
+
+/** Shown and not minimized — i.e. someone could be looking at the preview. */
+export function isMainWindowVisible(): boolean {
+  return !!mainWindow && mainWindow.isVisible() && !mainWindow.isMinimized()
 }
 
 /** Broadcast to the renderer regardless of window visibility. */
@@ -56,6 +62,13 @@ export function createMainWindow(options: { startHidden: boolean; firstHideHint:
   if (!options.startHidden) {
     mainWindow.on('ready-to-show', () => mainWindow?.show())
   }
+
+  // the renderer only spends effort on preview visuals while they can be seen
+  const reportVisibility = (): void => sendToRenderer(IPC.windowVisibility, isMainWindowVisible())
+  mainWindow.on('show', reportVisibility)
+  mainWindow.on('hide', reportVisibility)
+  mainWindow.on('minimize', reportVisibility)
+  mainWindow.on('restore', reportVisibility)
 
   // closing hides to the tray; the real quit comes from the tray menu
   let hintShown = false

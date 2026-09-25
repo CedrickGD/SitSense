@@ -17,15 +17,16 @@ SitSense/
 ├─ tailwind.config.ts, postcss.config.js
 ├─ scripts/
 │  └─ fetch-assets.mjs              # postinstall: copies wasm from node_modules,
-│                                   # downloads pose_landmarker_lite.task if absent
+│                                   # downloads the pose + face .task models if absent
 ├─ build/                           # electron-builder inputs
 │  └─ icon.ico                      # installer/app icon (256px multi-size)
 ├─ resources/                       # main-process runtime assets (asarUnpack'd)
-│  └─ tray/
-│     ├─ tray-good.ico              # each ICO: 16/20/24/32/48 px frames
-│     ├─ tray-warn.ico
-│     ├─ tray-bad.ico
-│     └─ tray-paused.ico
+│  ├─ tray/
+│  │  ├─ tray-good.ico              # each ICO: 16/20/24/32/48 px frames
+│  │  ├─ tray-warn.ico
+│  │  ├─ tray-bad.ico
+│  │  └─ tray-paused.ico
+│  └─ toast/                        # 96px toast logos: <issue>-<stage>.png + good.png
 └─ src/
    ├─ shared/                       # imported by all three processes — types only
    │  ├─ ipc.ts                     # channel constants + payload types (§5)
@@ -48,6 +49,7 @@ SitSense/
       ├─ public/                    # copied verbatim into out/renderer by Vite
       │  ├─ mediapipe/wasm/         # the 6 files from @mediapipe/tasks-vision/wasm
       │  └─ models/pose_landmarker_lite.task   (~5.5 MB)
+      │     models/face_landmarker.task        (~3.7 MB, preview mesh only)
       └─ src/
          ├─ main.tsx, App.tsx
          ├─ ipc.ts                  # typed wrapper over window.sitsense

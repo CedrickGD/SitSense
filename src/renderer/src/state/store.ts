@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { AppRoute, PauseState } from '@shared/ipc'
 import type { DetectionStatus, PostureSnapshot, TodayStats } from '@shared/posture'
 import type { Settings } from '@shared/settings'
+import type { BodyMesh } from '@renderer/overlay/bodyMesh'
 import type { PlacementCheck } from '@renderer/posture/calibration'
 import type { Landmark } from '@renderer/posture/types'
 
@@ -27,6 +28,12 @@ export interface AppState {
   calibration: CalibrationUiState
   /** latest landmarks for the preview overlay (null = no pose) */
   overlay: Landmark[] | null
+  /** body wireframe for the mesh/hologram preview styles (null = no person or not requested) */
+  mesh: BodyMesh | null
+  /** segmentation isn't available on this machine — mesh styles fall back to the skeleton */
+  meshUnavailable: boolean
+  /** main window shown and not minimized */
+  windowVisible: boolean
   today: TodayStats | null
   appVersion: string
 
@@ -50,6 +57,9 @@ export const useAppStore = create<AppState>((set) => ({
     banner: null
   },
   overlay: null,
+  mesh: null,
+  meshUnavailable: false,
+  windowVisible: true,
   today: null,
   appVersion: '',
 

@@ -26,7 +26,8 @@ export const IPC = {
   pauseChanged: 'pause:changed',
   requestCalibration: 'control:calibrate',
   navigate: 'control:navigate',
-  systemResumed: 'system:resumed'
+  systemResumed: 'system:resumed',
+  windowVisibility: 'window:visibility'
 } as const
 
 export type AppRoute = 'dashboard' | 'calibrate' | 'settings'
@@ -41,6 +42,8 @@ export interface AppStatus {
   version: string
   pause: PauseState
   packaged: boolean
+  /** main window is shown and not minimized (tray-hidden = false) */
+  windowVisible: boolean
 }
 
 export type WindowControlAction = 'minimize' | 'hide'
@@ -67,4 +70,5 @@ export interface SitSenseApi {
   onRequestCalibration(cb: () => void): () => void
   onNavigate(cb: (route: AppRoute) => void): () => void
   onSystemResumed(cb: () => void): () => void
+  onWindowVisibility(cb: (visible: boolean) => void): () => void
 }

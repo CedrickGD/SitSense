@@ -1,14 +1,23 @@
 import { useEffect, useRef, useState, type JSX } from 'react'
 import type { CameraError } from '@shared/posture'
+import { DEFAULT_SETTINGS, OVERLAY_PRESETS, type OverlaySettings } from '@shared/settings'
 import { detectionController } from '@renderer/detection/controller'
 import { LM } from '@renderer/posture/constants'
 import type { Landmark } from '@renderer/posture/types'
 import { useAppStore } from '@renderer/state/store'
 import { STAGE_COLOR } from '@renderer/lib/ui'
+import MeshOverlay from './MeshOverlay'
 import { Button, EmptyState } from './primitives'
 
-function PoseOverlay({ landmarks, aspect }: { landmarks: Landmark[]; aspect: number }): JSX.Element {
-  const color = STAGE_COLOR[useAppStore((s) => s.snapshot?.worstStage ?? 0)]
+/** CSS color of the overlay for the current settings and posture stage. */
+function useOverlayColor(overlay: OverlaySettings): string {
+  const stage = useAppStore((s) => (s.snapshot?.presence === 'active' ? s.snapshot.worstStage : 0))
+  if (overlay.color === 'posture') return STAGE_COLOR[stage]
+  if (overlay.color === 'custom') return overlay.customColor
+  return OVERLAY_PRESETS[overlay.color]
+}
+
+function PoseOverlay({ landmarks, aspect, color }: { landmarks: Landmark[]; aspect: number; color: string }): JSX.Element {
   // viewBox mirrors the video's intrinsic aspect and 'slice' crops exactly like
   // object-cover, so overlay points land on the pixels they were detected on
   const vw = 100
@@ -122,15 +131,30 @@ function CameraErrorState({ error }: { error: Exclude<CameraError, null> }): JSX
 interface CameraFeedProps {
   /** show the away state inside the frame */
   showAway?: boolean
+  /** smaller chrome for embedded previews (settings) */
+  compact?: boolean
 }
 
-export default function CameraFeed({ showAway = true }: CameraFeedProps): JSX.Element {
+export default function CameraFeed({ showAway = true, compact = false }: CameraFeedProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [aspect, setAspect] = useState(4 / 3)
   const detection = useAppStore((s) => s.detection)
   const overlay = useAppStore((s) => s.overlay)
   const snapshot = useAppStore((s) => s.snapshot)
   const pause = useAppStore((s) => s.pause)
+  const overlaySettings = useAppStore((s) => s.settings?.overlay) ?? DEFAULT_SETTINGS.overlay
+  const meshUnavailable = useAppStore((s) => s.meshUnavailable)
+  const overlayColor = useOverlayColor(overlaySettings)
+
+  const wantsMesh = overlaySettings.style === 'mesh' || overlaySettings.style === 'hologram'
+  const style = wantsMesh && meshUnavailable ? 'skeleton' : overlaySettings.style
+  const hologram = style === 'hologram' && !pause.paused
+  const showMesh = (style === 'mesh' || style === 'hologram') && !pause.paused && !detection.cameraError
+
+  useEffect(() => {
+    if (!showMesh) return
+    return detectionController.acquireMesh()
+  }, [showMesh])
 
   useEffect(() => {
     const v = videoRef.current
@@ -168,10 +192,23 @@ export default function CameraFeed({ showAway = true }: CameraFeedProps): JSX.El
             muted
             playsInline
             className={`h-full w-full -scale-x-100 object-cover transition-all duration-300 ${
-              pause.paused ? 'opacity-40 blur-md saturate-0' : ''
+              pause.paused ? 'opacity-40 blur-md saturate-0' : hologram ? 'brightness-[.32] contrast-125 saturate-[.35]' : ''
             }`}
           />
-          {overlay && !pause.paused && <PoseOverlay landmarks={overlay} aspect={aspect} />}
+          {hologram && (
+            <>
+              <div
+                className="pointer-events-none absolute inset-0 mix-blend-screen transition-colors duration-500"
+                style={{ backgroundColor: `color-mix(in srgb, ${overlayColor} 10%, transparent)` }}
+              />
+              <div className="hologram-scanlines pointer-events-none absolute inset-0" />
+              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_45%,rgba(0,0,0,0.55)_100%)]" />
+            </>
+          )}
+          {showMesh && <MeshOverlay />}
+          {style === 'skeleton' && overlay && !pause.paused && (
+            <PoseOverlay landmarks={overlay} aspect={aspect} color={overlayColor} />
+          )}
           {/* plumb line: the calibrated center, the app's alignment motif */}
           {!pause.paused && <div className="absolute inset-y-0 left-1/2 w-px bg-white/10" />}
           {away && (
@@ -184,7 +221,7 @@ export default function CameraFeed({ showAway = true }: CameraFeedProps): JSX.El
               </div>
             </div>
           )}
-          <div className="absolute top-3 left-3">
+          <div className={`absolute top-3 left-3 ${compact ? 'hidden' : ''}`}>
             {pause.paused ? (
               <span className="flex items-center gap-1.5 rounded-full bg-ink/70 px-2.5 py-1 text-xs text-slate-cool">
                 ⏸ Paused
@@ -198,7 +235,9 @@ export default function CameraFeed({ showAway = true }: CameraFeedProps): JSX.El
             )}
           </div>
           <div
-            className="absolute top-3 right-3 flex items-center gap-1 rounded-full bg-ink/70 px-2.5 py-1 text-[11px] text-text-faint"
+            className={`absolute top-3 right-3 flex items-center gap-1 rounded-full bg-ink/70 px-2.5 py-1 text-[11px] text-text-faint ${
+              compact ? 'hidden' : ''
+            }`}
             title="All processing happens on this device. Nothing is uploaded — ever."
           >
             <svg width="10" height="10" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>

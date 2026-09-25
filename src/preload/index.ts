@@ -27,7 +27,8 @@ const api: SitSenseApi = {
   onPauseChanged: (cb) => subscribe(IPC.pauseChanged, cb as (...args: unknown[]) => void),
   onRequestCalibration: (cb) => subscribe(IPC.requestCalibration, cb as (...args: unknown[]) => void),
   onNavigate: (cb) => subscribe(IPC.navigate, cb as (...args: unknown[]) => void),
-  onSystemResumed: (cb) => subscribe(IPC.systemResumed, cb as (...args: unknown[]) => void)
+  onSystemResumed: (cb) => subscribe(IPC.systemResumed, cb as (...args: unknown[]) => void),
+  onWindowVisibility: (cb) => subscribe(IPC.windowVisibility, cb as (...args: unknown[]) => void)
 }
 
 contextBridge.exposeInMainWorld('sitsense', api)

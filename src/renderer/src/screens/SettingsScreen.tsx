@@ -1,8 +1,17 @@
-import { Fragment, useState, type JSX, type ReactNode } from 'react'
+import { Fragment, useEffect, useRef, useState, type JSX, type ReactNode } from 'react'
 import { ISSUE_LABELS, ISSUES, type IssueId } from '@shared/posture'
-import { PRESET_FPS, type PerformancePreset, type Settings } from '@shared/settings'
+import {
+  OVERLAY_PRESETS,
+  PRESET_FPS,
+  type OverlayColor,
+  type OverlayPreset,
+  type OverlayStyle,
+  type PerformancePreset,
+  type Settings
+} from '@shared/settings'
 import { STAGE_COLOR } from '@renderer/lib/ui'
 import { useAppStore } from '@renderer/state/store'
+import CameraFeed from '@renderer/components/CameraFeed'
 import SpineGlyph from '@renderer/components/SpineGlyph'
 import { Button, SegmentedControl, Slider, Toggle } from '@renderer/components/primitives'
 
@@ -36,6 +45,112 @@ function Row({ label, sub, control }: { label: string; sub?: string; control: Re
   )
 }
 
+const STYLE_HINTS: Record<OverlayStyle, string> = {
+  mesh: 'A wireframe that wraps your whole silhouette, denser on the face.',
+  hologram: 'The same wireframe with the camera image dimmed, so it glows.',
+  skeleton: 'Minimal markers on head and shoulders.',
+  off: 'Just the camera image — detection keeps running either way.'
+}
+
+const PRESET_LABELS: Record<OverlayPreset, string> = {
+  ice: 'Ice',
+  cyan: 'Cyan',
+  violet: 'Violet',
+  magenta: 'Magenta',
+  lime: 'Lime',
+  gold: 'Gold',
+  white: 'White'
+}
+
+const swatchClass = (selected: boolean): string =>
+  `relative h-7 w-7 shrink-0 cursor-pointer rounded-full transition-transform focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:ring-offset-2 focus-visible:ring-offset-card focus-visible:outline-none has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sage/70 ${
+    selected ? 'scale-110 ring-2 ring-text ring-offset-2 ring-offset-card' : 'ring-1 ring-white/15 hover:scale-105'
+  }`
+
+function Swatch({
+  label,
+  selected,
+  background,
+  onClick
+}: {
+  label: string
+  selected: boolean
+  background: string
+  onClick: () => void
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={selected}
+      onClick={onClick}
+      className={swatchClass(selected)}
+      style={{ background }}
+    />
+  )
+}
+
+function OverlayColorPicker({
+  color,
+  customColor,
+  onChange
+}: {
+  color: OverlayColor
+  customColor: string
+  onChange: (patch: { color: OverlayColor; customColor?: string }) => void
+}): JSX.Element {
+  const [draft, setDraft] = useState(customColor)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => setDraft(customColor), [customColor])
+  useEffect(() => () => void (timer.current && clearTimeout(timer.current)), [])
+
+  const postureGradient = `conic-gradient(${[0, 1, 2, 3, 0].map((st) => STAGE_COLOR[st as 0 | 1 | 2 | 3]).join(', ')})`
+  return (
+    <div className="flex flex-wrap items-center gap-2.5">
+      <Swatch
+        label="Posture — follows your stage colors"
+        selected={color === 'posture'}
+        background={postureGradient}
+        onClick={() => onChange({ color: 'posture' })}
+      />
+      <span className="mx-0.5 h-5 w-px bg-hairline" />
+      {(Object.keys(OVERLAY_PRESETS) as OverlayPreset[]).map((p) => (
+        <Swatch
+          key={p}
+          label={PRESET_LABELS[p]}
+          selected={color === p}
+          background={OVERLAY_PRESETS[p]}
+          onClick={() => onChange({ color: p })}
+        />
+      ))}
+      <label
+        title="Custom color"
+        className={swatchClass(color === 'custom')}
+        style={{ background: color === 'custom' ? draft : 'conic-gradient(#f66, #fd5, #6e8, #5cf, #a8f, #f6c, #f66)' }}
+        onClick={(e) => {
+          // the label forwards a second click to the input; only react to the user's own
+          if (e.target === e.currentTarget && color !== 'custom') onChange({ color: 'custom', customColor: draft })
+        }}
+      >
+        <input
+          type="color"
+          value={draft}
+          aria-label="Custom color"
+          className="sr-only"
+          onChange={(e) => {
+            const next = e.target.value
+            setDraft(next)
+            // the native picker streams values while dragging — commit at a calmer pace
+            if (timer.current) clearTimeout(timer.current)
+            timer.current = setTimeout(() => onChange({ color: 'custom', customColor: next }), 120)
+          }}
+        />
+      </label>
+    </div>
+  )
+}
+
 function sensitivityIndex(v: number): number {
   let best = 0
   SENSITIVITY_STEPS.forEach((s, i) => {
@@ -60,6 +175,7 @@ export default function SettingsScreen(): JSX.Element {
   const patchSettings = useAppStore((s) => s.patchSettings)
   const setRoute = useAppStore((s) => s.setRoute)
   const appVersion = useAppStore((s) => s.appVersion)
+  const meshUnavailable = useAppStore((s) => s.meshUnavailable)
   const [fineTune, setFineTune] = useState(false)
 
   if (!settings) return <div className="p-6 text-text-dim">Loading…</div>
@@ -78,7 +194,7 @@ export default function SettingsScreen(): JSX.Element {
             <select
               value={settings.cameraDeviceId ?? ''}
               onChange={(e) => void patchSettings({ cameraDeviceId: e.target.value || null })}
-              className="rounded-[10px] bg-ink px-3 py-2 text-[13px] text-text ring-1 ring-white/8 focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none"
+              className="max-w-60 truncate rounded-[10px] bg-ink px-3 py-2 text-[13px] text-text ring-1 ring-white/8 focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none"
             >
               <option value="">Default camera</option>
               {cameras.map((c) => (
@@ -98,6 +214,49 @@ export default function SettingsScreen(): JSX.Element {
           }
           control={<Button onClick={() => setRoute('calibrate')}>{settings.calibration ? 'Recalibrate' : 'Calibrate'}</Button>}
         />
+      </Section>
+
+      <Section title="Camera overlay">
+        <div className="overflow-hidden rounded-[20px]">
+          <CameraFeed showAway={false} compact />
+        </div>
+        <Row
+          label="Style"
+          sub={
+            meshUnavailable && (settings.overlay.style === 'mesh' || settings.overlay.style === 'hologram')
+              ? 'This machine can’t run the body outline model — showing the skeleton instead.'
+              : STYLE_HINTS[settings.overlay.style]
+          }
+          control={
+            <SegmentedControl<OverlayStyle>
+              value={settings.overlay.style}
+              onChange={(v) => void patchSettings({ overlay: { style: v } })}
+              options={[
+                { value: 'mesh', label: 'Mesh' },
+                { value: 'hologram', label: 'Hologram' },
+                { value: 'skeleton', label: 'Skeleton' },
+                { value: 'off', label: 'Off' }
+              ]}
+            />
+          }
+        />
+        {settings.overlay.style !== 'off' && (
+          <div className="flex flex-col gap-2">
+            <div>
+              <p className="text-[13px] text-text">Color</p>
+              <p className="mt-0.5 text-xs text-text-faint">
+                {settings.overlay.color === 'posture'
+                  ? 'Follows your posture: sage when aligned, amber to coral as it slips.'
+                  : 'Your color, always — the problem area still lights up in its warning color.'}
+              </p>
+            </div>
+            <OverlayColorPicker
+              color={settings.overlay.color}
+              customColor={settings.overlay.customColor}
+              onChange={(patch) => void patchSettings({ overlay: patch })}
+            />
+          </div>
+        )}
       </Section>
 
       <Section title="Detection">
