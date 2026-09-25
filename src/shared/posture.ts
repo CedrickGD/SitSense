@@ -92,6 +92,15 @@ export interface CalibrationBaseline {
   phiSh0: number | null
   /** lateral head offset in scale units */
   o0: number | null
+  /**
+   * Eye-referenced twins of yHd0/h0/o0. yHd0/h0/o0 are measured from the ear
+   * midpoint whenever ears were captured; when ears drop out at runtime the
+   * head position comes from the eyes and must be compared against these.
+   * Optional: baselines captured before they existed simply lack them.
+   */
+  yHdEye0?: number | null
+  hEye0?: number | null
+  oEye0?: number | null
 }
 
 export type CameraError = 'in-use' | 'not-found' | 'denied' | null
@@ -102,6 +111,8 @@ export interface DetectionStatus {
   targetFps: number
   measuredFps: number
   cameraError: CameraError
+  /** the pose model couldn't be loaded or keeps failing (not a camera problem) */
+  modelError: boolean
 }
 
 /** One minute of the day's posture log (for the Today strip). */

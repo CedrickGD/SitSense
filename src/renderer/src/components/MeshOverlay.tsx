@@ -162,8 +162,16 @@ export default function MeshOverlay(): JSX.Element {
       let bottom = -Infinity
       let left = Infinity
       let right = -Infinity
+      // inlined projection: this runs for every vertex at 30 fps
+      const ax = offX + anchor.x * dh
+      const ay = offY + anchor.y * dh
+      const k1 = cos * anchor.scale * dh
+      const k2 = sin * anchor.scale * dh
       for (let k = 0; k < n; k++) {
-        const [x, y] = project(mesh.u[k], mesh.v[k])
+        const u = mesh.u[k]
+        const v = mesh.v[k]
+        const x = ax + k1 * u - k2 * v
+        const y = ay + k2 * u + k1 * v
         px[k] = x
         py[k] = y
         if (y < top) top = y

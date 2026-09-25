@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { app } from 'electron'
 import { DEFAULT_SETTINGS, mergeSettings, type Settings } from '../shared/settings'
+import { readJson, writeJsonAtomic } from './json-file'
 
 type Listener = (s: Settings) => void
 
@@ -12,11 +12,10 @@ let saveTimer: NodeJS.Timeout | null = null
 const settingsFile = (): string => join(app.getPath('userData'), 'settings.json')
 
 export function loadSettings(): Settings {
-  try {
-    settings = mergeSettings(JSON.parse(readFileSync(settingsFile(), 'utf8')))
-  } catch {
-    settings = structuredClone(DEFAULT_SETTINGS)
-  }
+  // a missing or unreadable file means defaults — but a corrupt one is set
+  // aside (and the .bak used) rather than overwritten, see readJson
+  const raw = readJson(settingsFile())
+  settings = raw === null ? structuredClone(DEFAULT_SETTINGS) : mergeSettings(raw)
   return settings
 }
 
@@ -60,12 +59,8 @@ export function saveNow(): void {
     clearTimeout(saveTimer)
     saveTimer = null
   }
-  const file = settingsFile()
-  const tmp = `${file}.tmp`
   try {
-    mkdirSync(dirname(file), { recursive: true })
-    writeFileSync(tmp, JSON.stringify(settings, null, 2))
-    renameSync(tmp, file)
+    writeJsonAtomic(settingsFile(), settings, { backup: true })
   } catch (err) {
     console.error('[settings] save failed:', err)
   }

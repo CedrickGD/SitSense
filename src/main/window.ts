@@ -1,6 +1,8 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
+import { devServerUrl } from './privacy'
+import { getSettings } from './settings-store'
 
 let mainWindow: BrowserWindow | null = null
 let quitting = false
@@ -26,6 +28,23 @@ export function isMainWindowVisible(): boolean {
   return !!mainWindow && mainWindow.isVisible() && !mainWindow.isMinimized()
 }
 
+/** The app's own pages: the packaged app:// origin, or the dev server in development. */
+function isAppUrl(url: string): boolean {
+  if (url === 'app://renderer' || url.startsWith('app://renderer/')) return true
+  const dev = devServerUrl()
+  if (!dev) return false
+  try {
+    return new URL(url).origin === dev.origin
+  } catch {
+    return false
+  }
+}
+
+/** A crashed renderer is reloaded (it re-reads pause/settings on boot) — but not in a loop. */
+const RELOAD_LIMIT = 3
+const RELOAD_WINDOW_MS = 10 * 60_000
+const recentCrashes: number[] = []
+
 /** Broadcast to the renderer regardless of window visibility. */
 export function sendToRenderer(channel: string, ...args: unknown[]): void {
   mainWindow?.webContents.send(channel, ...args)
@@ -48,15 +67,46 @@ export function createMainWindow(options: { startHidden: boolean; firstHideHint:
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // the preload only needs `electron` — the renderer, which chews on a
+      // webcam stream all day, gets Chromium's full process sandbox
+      sandbox: true,
+      spellcheck: false,
       // detection must keep running while the window is hidden in the tray
       backgroundThrottling: false
     }
   })
 
-  // camera only — everything else is denied
-  mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, cb) => {
-    cb(permission === 'media')
+  // the webcam for our own pages only — no microphone, nothing else, no other origin
+  mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, cb, details) => {
+    const types = 'mediaTypes' in details ? details.mediaTypes : undefined
+    cb(
+      permission === 'media' &&
+        isAppUrl(details.requestingUrl) &&
+        !!types &&
+        types.length > 0 &&
+        types.every((t) => t === 'video')
+    )
+  })
+  // permission *checks* (navigator.permissions, device labels) follow the same rule
+  mainWindow.webContents.session.setPermissionCheckHandler((_wc, permission, _origin, details) => {
+    return permission === 'media' && details.mediaType !== 'audio' && isAppUrl(details.requestingUrl ?? '')
+  })
+  // nothing in the app navigates; a page swap would inherit the preload API and camera
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (!isAppUrl(url)) e.preventDefault()
+  })
+
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    if (quitting || details.reason === 'clean-exit') return
+    const now = Date.now()
+    while (recentCrashes.length && now - recentCrashes[0] > RELOAD_WINDOW_MS) recentCrashes.shift()
+    recentCrashes.push(now)
+    console.error(`[window] renderer gone (${details.reason})`)
+    if (recentCrashes.length > RELOAD_LIMIT) {
+      console.error('[window] renderer keeps crashing — not reloading again')
+      return
+    }
+    setTimeout(() => mainWindow?.webContents.reload(), 2_000)
   })
 
   if (!options.startHidden) {
@@ -70,9 +120,15 @@ export function createMainWindow(options: { startHidden: boolean; firstHideHint:
   mainWindow.on('minimize', reportVisibility)
   mainWindow.on('restore', reportVisibility)
 
-  // closing hides to the tray; the real quit comes from the tray menu
+  // closing hides to the tray (unless the user turned that off); the real
+  // quit comes from the tray menu
   let hintShown = false
   mainWindow.on('close', (e) => {
+    if (!quitting && !getSettings().general.closeToTray) {
+      quitting = true
+      app.quit()
+      return
+    }
     if (!quitting) {
       e.preventDefault()
       mainWindow?.hide()
@@ -83,13 +139,12 @@ export function createMainWindow(options: { startHidden: boolean; firstHideHint:
     }
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
-    return { action: 'deny' }
-  })
+  // the app has no external links; never hand renderer-supplied URLs to the shell
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  const dev = devServerUrl()
+  if (dev) {
+    mainWindow.loadURL(dev.toString())
   } else {
     mainWindow.loadURL('app://renderer/index.html')
   }

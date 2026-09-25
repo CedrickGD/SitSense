@@ -16,7 +16,8 @@ export class FrameLoop {
   private busy = false
 
   private lastRvfcTick = 0
-  private lastProcessed = 0
+  /** when the next frame is due; frames are taken on a schedule, not "≥ interval since the last" */
+  private due = 0
   private rvfcHandle: number | null = null
   private watchdog: ReturnType<typeof setInterval> | null = null
   private fallbackTimer: ReturnType<typeof setInterval> | null = null
@@ -29,9 +30,11 @@ export class FrameLoop {
 
   setFps(fps: number): void {
     this.intervalMs = 1000 / fps
+    this.due = 0
     if (this.fallbackTimer) {
+      // re-arm at the new cadence right away (a capture can't wait for the watchdog)
       clearInterval(this.fallbackTimer)
-      this.fallbackTimer = null // watchdog restarts it at the new cadence
+      this.fallbackTimer = setInterval(() => this.maybeProcess(), this.intervalMs)
     }
   }
 
@@ -68,11 +71,23 @@ export class FrameLoop {
     })
   }
 
+  /**
+   * The camera is actually delivering frames. A stalled camera keeps its last
+   * frame (readyState stays ≥ 2) and Chromium mutes its track — that silence
+   * must not be mistaken for "window hidden" and fed to the model forever.
+   */
+  private streamLive(): boolean {
+    const src = this.video.srcObject
+    if (!(src instanceof MediaStream) || this.video.readyState < 2) return false
+    const track = src.getVideoTracks()[0]
+    return !!track && track.readyState === 'live' && !track.muted
+  }
+
   private checkStarvation(): void {
     if (!this.running) return
     const starvedMs = performance.now() - this.lastRvfcTick
     const threshold = Math.max(3 * this.intervalMs, 1000)
-    const streamLive = this.video.srcObject instanceof MediaStream && this.video.readyState >= 2
+    const streamLive = this.streamLive()
     if (starvedMs > threshold && streamLive) {
       if (!this.fallbackTimer) {
         this.fallbackTimer = setInterval(() => this.maybeProcess(), this.intervalMs)
@@ -85,10 +100,14 @@ export class FrameLoop {
 
   private maybeProcess(): void {
     const now = performance.now()
-    if (now - this.lastProcessed < this.intervalMs) return
+    // half-interval tolerance: callback jitter must not push a due frame to
+    // the next tick (a plain "≥ interval since last" gate ran at ~60–80% fps)
+    if (now < this.due - this.intervalMs / 2) return
     if (this.busy) return // skip if the previous inference is still running (CPU delegate)
-    if (this.video.readyState < 2) return
-    this.lastProcessed = now
+    if (!this.streamLive()) return
+    // advance on the schedule (keeps the average rate exact); after a stall,
+    // restart the schedule from now instead of bursting to catch up
+    this.due = Math.max(this.due, now - this.intervalMs / 2) + this.intervalMs
     this.busy = true
     Promise.resolve(this.onFrame()).finally(() => {
       this.busy = false

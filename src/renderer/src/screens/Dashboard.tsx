@@ -1,6 +1,14 @@
-import { useEffect, useMemo, useState, type JSX } from 'react'
+import { useEffect, useMemo, useRef, useState, type JSX, type KeyboardEvent, type PointerEvent } from 'react'
 import { ISSUE_LABELS, ISSUES, type IssueId, type Stage, type StatMinute } from '@shared/posture'
-import { formatClock, formatCountdown, formatDuration, ISSUE_SHORT, STAGE_COLOR, STAGE_LABEL } from '@renderer/lib/ui'
+import {
+  formatClock,
+  formatCountdown,
+  formatDuration,
+  STAGE_COLOR,
+  STAGE_LABEL,
+  useMediaQuery,
+  useNow
+} from '@renderer/lib/ui'
 import { useAppStore } from '@renderer/state/store'
 import CameraFeed from '@renderer/components/CameraFeed'
 import SpineGlyph from '@renderer/components/SpineGlyph'
@@ -15,51 +23,120 @@ function worstIssue(issues: Record<IssueId, { stage: Stage }>): { issue: IssueId
   return best
 }
 
+type Condition = 'paused' | 'uncalibrated' | 'camera' | 'model' | 'starting' | 'away' | 'issue' | 'good'
+
+/** What the dashboard can honestly say right now, most blocking first. */
+function useCondition(): Condition {
+  const snapshot = useAppStore((s) => s.snapshot)
+  const pause = useAppStore((s) => s.pause)
+  const detection = useAppStore((s) => s.detection)
+  const hasBaseline = useAppStore((s) => !!s.settings?.calibration)
+  if (pause.paused) return 'paused'
+  if (!hasBaseline) return 'uncalibrated'
+  if (detection.cameraError) return 'camera'
+  if (detection.modelError) return 'model'
+  if (!detection.running || !snapshot) return 'starting'
+  if (snapshot.presence === 'away') return 'away'
+  return worstIssue(snapshot.issues) ? 'issue' : 'good'
+}
+
+function PauseControls(): JSX.Element {
+  const pause = useAppStore((s) => s.pause)
+  const now = useNow(1000, pause.paused && pause.resumeAt !== null)
+  return (
+    <div className="w-full rounded-2xl bg-card p-4 ring-1 ring-white/8">
+      <div className="flex items-center justify-between">
+        <span className="text-[13px] text-text">Monitoring</span>
+        <Toggle label="Monitoring" checked={!pause.paused} onChange={(on) => window.sitsense.setPause(!on, null)} />
+      </div>
+      <div className="mt-3">
+        {pause.paused ? (
+          <Button variant="primary" className="w-full" onClick={() => window.sitsense.setPause(false)}>
+            {pause.resumeAt ? `Resume — ${formatCountdown(pause.resumeAt - now)}` : 'Resume monitoring'}
+          </Button>
+        ) : (
+          <div className="flex">
+            <Button className="flex-1 rounded-r-none" onClick={() => window.sitsense.setPause(true, 15)}>
+              Pause 15 min
+            </Button>
+            <Menu
+              label="More pause options"
+              align="right"
+              triggerClassName="rounded-l-none border-l border-hairline px-2"
+              trigger="▾"
+              items={[
+                { label: '15 minutes', onClick: () => window.sitsense.setPause(true, 15) },
+                { label: '30 minutes', onClick: () => window.sitsense.setPause(true, 30) },
+                { label: '60 minutes', onClick: () => window.sitsense.setPause(true, 60) },
+                { label: 'Until I resume', onClick: () => window.sitsense.setPause(true, null) }
+              ]}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function StatusColumn(): JSX.Element {
   const snapshot = useAppStore((s) => s.snapshot)
   const pause = useAppStore((s) => s.pause)
-  const settings = useAppStore((s) => s.settings)
   const setRoute = useAppStore((s) => s.setRoute)
-  const [, forceTick] = useState(0)
+  const condition = useCondition()
+  const short = useMediaQuery('(max-height: 680px)')
+  const cameraChanged = useAppStore((s) => {
+    const baselineCam = s.settings?.calibration?.cameraDeviceId
+    return !!baselineCam && !!s.activeCameraId && baselineCam !== s.activeCameraId
+  })
 
-  // the "Resume — mm:ss" countdown needs a clock to tick against
-  useEffect(() => {
-    if (!pause.paused || !pause.resumeAt) return
-    const timer = setInterval(() => forceTick((t) => t + 1), 1000)
-    return () => clearInterval(timer)
-  }, [pause.paused, pause.resumeAt])
+  // "47 min in good posture": remember when the current good stretch began
+  const isGood = condition === 'good'
+  const [goodSince, setGoodSince] = useState<number | null>(null)
+  useEffect(() => setGoodSince(isGood ? Date.now() : null), [isGood])
+  const now = useNow(condition === 'paused' ? 1000 : 15_000, condition === 'good' || (condition === 'paused' && pause.resumeAt !== null))
 
-  const worst = snapshot ? worstIssue(snapshot.issues) : null
-  const away = snapshot?.presence === 'away'
-  const mode = pause.paused ? 'paused' : away ? 'away' : 'normal'
-  const activeIssues = snapshot
-    ? ISSUES.map((id) => snapshot.issues[id]).filter((i) => i.stage > 0)
-    : []
+  const worst = snapshot && condition === 'issue' ? worstIssue(snapshot.issues) : null
+  const watching = condition === 'issue' || condition === 'good'
+  const activeIssues = snapshot && watching ? ISSUES.map((id) => snapshot.issues[id]).filter((i) => i.stage > 0) : []
 
-  const statusWord = pause.paused
-    ? 'Paused'
-    : away
-      ? 'Away'
-      : !snapshot?.calibrated
-        ? 'Not calibrated'
-        : worst
-          ? ISSUE_LABELS[worst.issue]
-          : 'Good'
+  const statusWord: Record<Condition, string> = {
+    paused: 'Paused',
+    uncalibrated: 'Not calibrated',
+    camera: 'Camera unavailable',
+    model: "Can't start",
+    starting: 'Starting…',
+    away: 'Away',
+    issue: worst ? ISSUE_LABELS[worst.issue] : '',
+    good: 'Good'
+  }
+  const sub: Partial<Record<Condition, string>> = {
+    paused: pause.resumeAt ? `${formatCountdown(pause.resumeAt - now)} left` : 'until you resume',
+    camera: 'Monitoring resumes as soon as the camera is back.',
+    model: "The posture model couldn't load. Retrying…",
+    away: 'Time away isn’t counted against your day.',
+    // the clock only ticks every 15 s — a seconds count would just stutter
+    good:
+      goodSince !== null && now - goodSince >= 60_000
+        ? `${formatDuration(now - goodSince)} in good posture`
+        : 'Sitting well.'
+  }
 
   return (
     <div className="flex w-full flex-col items-center gap-4">
       <SpineGlyph
-        size={96}
+        size={short ? 64 : 96}
         issue={worst?.issue ?? null}
-        stage={pause.paused || away ? 0 : (worst?.stage ?? 0)}
+        stage={worst?.stage ?? 0}
         direction={worst?.issue === 'lean' ? snapshot?.issues.lean.direction : undefined}
-        mode={mode}
+        mode={condition === 'paused' ? 'paused' : watching ? 'normal' : 'away'}
       />
-      <div className="text-center">
-        <h1 className="font-display text-[34px] leading-tight font-semibold tracking-tight text-text">
-          {statusWord}
+      <div className="text-center" aria-live="polite">
+        <h1
+          className={`font-display leading-tight font-semibold tracking-tight text-text ${short ? 'text-[26px]' : 'text-[34px]'}`}
+        >
+          {statusWord[condition]}
         </h1>
-        {worst && !pause.paused && !away && (
+        {worst && (
           <div className="mt-1 flex items-center justify-center gap-2">
             <StagePill label={STAGE_LABEL[worst.stage]} color={STAGE_COLOR[worst.stage]} />
             {snapshot?.issues[worst.issue].activeForMs != null && (
@@ -69,14 +146,52 @@ function StatusColumn(): JSX.Element {
             )}
           </div>
         )}
-        {!snapshot?.calibrated && !pause.paused && (
+        {sub[condition] && (
+          <p className={`mt-1 max-w-56 ${condition === 'paused' || condition === 'good' ? 'font-mono text-[13px] text-text-dim' : 'text-xs text-text-faint'}`}>
+            {sub[condition]}
+          </p>
+        )}
+        {condition === 'uncalibrated' && (
           <p className="mt-1 max-w-52 text-xs text-text-faint">
             SitSense needs a baseline of your upright posture before it can watch over you.
           </p>
         )}
       </div>
 
-      {snapshot?.calibrated && (
+      {condition === 'uncalibrated' && (
+        <Button variant="primary" className="w-full" onClick={() => setRoute('calibrate')}>
+          Calibrate now
+        </Button>
+      )}
+
+      {/* controls first: they must stay reachable however much is shown below */}
+      <PauseControls />
+
+      {watching && cameraChanged && !snapshot?.recalibrationSuggested && (
+        <div className="w-full rounded-2xl bg-card p-4 ring-1 ring-amber/30">
+          <p className="text-[13px] text-text">Different camera</p>
+          <p className="mt-0.5 text-xs text-text-dim">
+            Your baseline was captured with another camera — recalibrate for accurate readings.
+          </p>
+          <Button variant="primary" className="mt-2" onClick={() => setRoute('calibrate')}>
+            Recalibrate
+          </Button>
+        </div>
+      )}
+
+      {watching && snapshot?.recalibrationSuggested && (
+        <div className="w-full rounded-2xl bg-card p-4 ring-1 ring-amber/30">
+          <p className="text-[13px] text-text">The view has changed</p>
+          <p className="mt-0.5 text-xs text-text-dim">
+            Your camera angle no longer matches your baseline, so nudges are on hold until you recalibrate.
+          </p>
+          <Button variant="primary" className="mt-2" onClick={() => setRoute('calibrate')}>
+            Recalibrate
+          </Button>
+        </div>
+      )}
+
+      {watching && (
         <div className="w-full rounded-2xl bg-card p-4 ring-1 ring-white/8">
           <p className="mb-2 text-xs font-medium text-text-faint uppercase">Detected now</p>
           {activeIssues.length === 0 ? (
@@ -95,66 +210,6 @@ function StatusColumn(): JSX.Element {
             </ul>
           )}
         </div>
-      )}
-
-      {snapshot?.recalibrationSuggested && (
-        <div className="w-full rounded-2xl bg-card p-4 ring-1 ring-amber/30">
-          <p className="text-[13px] text-text">The view has changed</p>
-          <p className="mt-0.5 text-xs text-text-dim">
-            Your camera angle no longer matches your baseline, so readings may be off.
-          </p>
-          <Button variant="primary" className="mt-2" onClick={() => setRoute('calibrate')}>
-            Recalibrate
-          </Button>
-        </div>
-      )}
-
-      <div className="w-full rounded-2xl bg-card p-4 ring-1 ring-white/8">
-        <div className="flex items-center justify-between">
-          <span className="text-[13px] text-text">Monitoring</span>
-          <Toggle
-            label="Monitoring"
-            checked={!pause.paused}
-            onChange={(on) => window.sitsense.setPause(!on, null)}
-          />
-        </div>
-        <div className="mt-3">
-          {pause.paused ? (
-            <Button
-              variant="primary"
-              className="w-full"
-              onClick={() => window.sitsense.setPause(false)}
-            >
-              {pause.resumeAt ? `Resume — ${formatCountdown(pause.resumeAt - Date.now())}` : 'Resume monitoring'}
-            </Button>
-          ) : (
-            <div className="flex">
-              <Button className="flex-1 rounded-r-none" onClick={() => window.sitsense.setPause(true, 15)}>
-                Pause 15 min
-              </Button>
-              <Menu
-                align="right"
-                trigger={
-                  <Button className="rounded-l-none border-l border-hairline px-2" title="More pause options">
-                    ▾
-                  </Button>
-                }
-                items={[
-                  { label: '15 minutes', onClick: () => window.sitsense.setPause(true, 15) },
-                  { label: '30 minutes', onClick: () => window.sitsense.setPause(true, 30) },
-                  { label: '60 minutes', onClick: () => window.sitsense.setPause(true, 60) },
-                  { label: 'Until I resume', onClick: () => window.sitsense.setPause(true, null) }
-                ]}
-              />
-            </div>
-          )}
-        </div>
-      </div>
-
-      {settings && !settings.calibration && (
-        <Button variant="primary" className="w-full" onClick={() => setRoute('calibrate')}>
-          Calibrate now
-        </Button>
       )}
     </div>
   )
@@ -191,22 +246,29 @@ function runColor(state: StatMinute['s']): string {
 function runLabel(state: StatMinute['s']): string {
   if (state === 'good') return 'Good posture'
   if (state === 'away') return 'Away'
-  if (state === 'paused') return 'Paused'
+  if (state === 'paused') return 'Not monitoring'
   const [issue, stage] = state.split(':')
-  return `${ISSUE_SHORT[issue as IssueId]} (${STAGE_LABEL[Number(stage) as Stage]})`
+  return `${ISSUE_LABELS[issue as IssueId]} (${STAGE_LABEL[Number(stage) as Stage]})`
 }
 
-function TodayStrip(): JSX.Element | null {
-  const today = useAppStore((s) => s.today)
+const runText = (r: Run): string => `${formatClock(r.from)} – ${formatClock(r.to + 1)} · ${runLabel(r.state)}`
 
+function TodayStrip(): JSX.Element {
+  const today = useAppStore((s) => s.today)
+  const windowVisible = useAppStore((s) => s.windowVisible)
+  const [focus, setFocus] = useState<{ run: number; x: number } | null>(null)
+  const barRef = useRef<HTMLDivElement>(null)
+
+  // only while someone can see it
   useEffect(() => {
+    if (!windowVisible) return
     const load = (): void => {
       window.sitsense.getTodayStats().then((today) => useAppStore.setState({ today }))
     }
     load()
     const timer = setInterval(load, 30_000)
     return () => clearInterval(timer)
-  }, [])
+  }, [windowVisible])
 
   const derived = useMemo(() => {
     if (!today || today.minutes.length === 0) return null
@@ -219,31 +281,79 @@ function TodayStrip(): JSX.Element | null {
       last: today.minutes[today.minutes.length - 1].m,
       good,
       bad,
-      pct: tracked > 0 ? Math.round((good / tracked) * 100) : 100
+      pct: tracked > 0 ? Math.round((good / tracked) * 100) : null
     }
   }, [today])
 
-  if (!derived) return null
+  if (!derived) {
+    return (
+      <div className="rounded-2xl bg-card p-4 ring-1 ring-white/8">
+        <p className="text-xs font-medium text-text-faint uppercase">Today</p>
+        <p className="mt-1 text-[13px] text-text-faint">
+          Your day’s timeline appears here once SitSense has watched for a minute.
+        </p>
+      </div>
+    )
+  }
   const span = Math.max(1, derived.last - derived.first + 1)
+  const runAt = (clientX: number): { run: number; x: number } | null => {
+    const rect = barRef.current?.getBoundingClientRect()
+    if (!rect || rect.width === 0) return null
+    const x = Math.min(Math.max(0, clientX - rect.left), rect.width)
+    const minute = derived.first + (x / rect.width) * span
+    const run = derived.runs.findIndex((r) => minute >= r.from && minute < r.to + 1)
+    return run >= 0 ? { run, x } : null
+  }
+  const centerOf = (i: number): number => {
+    const r = derived.runs[i]
+    const width = barRef.current?.getBoundingClientRect().width ?? 0
+    return ((r.from - derived.first + (r.to - r.from + 1) / 2) / span) * width
+  }
+  const onKey = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return
+    e.preventDefault()
+    const last = derived.runs.length - 1
+    const cur = focus?.run ?? (e.key === 'ArrowLeft' ? last + 1 : -1)
+    const next =
+      e.key === 'Home' ? 0 : e.key === 'End' ? last : Math.min(last, Math.max(0, cur + (e.key === 'ArrowRight' ? 1 : -1)))
+    setFocus({ run: next, x: centerOf(next) })
+  }
 
   return (
     <div className="flex items-center gap-6 rounded-2xl bg-card p-4 ring-1 ring-white/8">
       <div className="shrink-0">
         <p className="text-xs font-medium text-text-faint uppercase">Today</p>
-        <p className="font-display text-2xl font-semibold text-text">
-          {derived.pct}% <span className="text-sm font-normal text-text-dim">aligned</span>
-        </p>
-        <p className="font-mono text-xs text-text-dim">
-          {formatDuration(derived.good * 60_000)} good · {formatDuration(derived.bad * 60_000)} slouching
-        </p>
+        {derived.pct === null ? (
+          <p className="font-display text-lg font-semibold text-text-dim">No tracked time yet</p>
+        ) : (
+          <>
+            <p className="font-display text-2xl font-semibold text-text">
+              {derived.pct}% <span className="text-sm font-normal text-text-dim">aligned</span>
+            </p>
+            <p className="font-mono text-xs text-text-dim">
+              {formatDuration(derived.good * 60_000)} good · {formatDuration(derived.bad * 60_000)} poor posture
+            </p>
+          </>
+        )}
       </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex h-6 w-full overflow-hidden rounded-md bg-ink motion-safe:origin-left motion-safe:animate-[growIn_400ms_ease-out]">
+      <div className="relative min-w-0 flex-1">
+        <div
+          ref={barRef}
+          role="group"
+          tabIndex={0}
+          aria-label="Today's posture timeline — use the arrow keys to step through it"
+          onPointerMove={(e: PointerEvent<HTMLDivElement>) => setFocus(runAt(e.clientX))}
+          onPointerLeave={() => setFocus(null)}
+          onKeyDown={onKey}
+          onBlur={() => setFocus(null)}
+          className="flex h-6 w-full overflow-hidden rounded-md bg-ink focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none motion-safe:origin-left motion-safe:animate-[growIn_400ms_ease-out]"
+        >
           {derived.runs.map((r, i) => (
             <div
               key={i}
-              title={`${formatClock(r.from)} – ${formatClock(r.to + 1)} · ${runLabel(r.state)}`}
-              className={r.state === 'away' || r.state === 'paused' ? 'border-t border-dotted border-hairline' : ''}
+              className={`${r.state === 'away' || r.state === 'paused' ? 'border-t border-dotted border-hairline' : ''} ${
+                focus?.run === i ? 'brightness-125' : ''
+              }`}
               style={{
                 width: `${((r.to - r.from + 1) / span) * 100}%`,
                 backgroundColor: runColor(r.state)
@@ -251,6 +361,19 @@ function TodayStrip(): JSX.Element | null {
             />
           ))}
         </div>
+        {focus && (
+          <div
+            className="pointer-events-none absolute bottom-full mb-1.5 -translate-x-1/2 rounded-md bg-card px-2 py-1 font-mono text-xs whitespace-nowrap text-text shadow-lg ring-1 ring-white/10"
+            style={{
+              left: Math.min(Math.max(focus.x, 90), (barRef.current?.clientWidth ?? 0) - 90)
+            }}
+          >
+            {runText(derived.runs[focus.run])}
+          </div>
+        )}
+        <span className="sr-only" aria-live="polite">
+          {focus ? runText(derived.runs[focus.run]) : ''}
+        </span>
         <div className="mt-1 flex justify-between font-mono text-[11px] text-text-faint">
           <span>{formatClock(derived.first)}</span>
           <span>now</span>
@@ -263,15 +386,29 @@ function TodayStrip(): JSX.Element | null {
 export default function Dashboard(): JSX.Element {
   const hidePreview = useAppStore((s) => s.settings?.general.hidePreview ?? false)
   const patchSettings = useAppStore((s) => s.patchSettings)
+  const detection = useAppStore((s) => s.detection)
+  const paused = useAppStore((s) => s.pause.paused)
+  const snapshot = useAppStore((s) => s.snapshot)
+  const condition = useCondition()
+  const worst = snapshot && condition === 'issue' ? worstIssue(snapshot.issues) : null
+  // a problem must never hide behind a hidden preview
+  const showPlaceholder = hidePreview && !detection.cameraError && !detection.modelError
 
   return (
     <div className="flex h-full flex-col gap-4 p-6">
       <div className="flex min-h-0 flex-1 gap-6">
         <div className="flex min-w-0 flex-[3] flex-col gap-2">
-          {hidePreview ? (
+          {showPlaceholder ? (
             <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-[20px] bg-surface ring-1 ring-white/8">
-              <SpineGlyph size={72} issue={null} stage={0} />
-              <p className="text-xs text-text-faint">Preview hidden — monitoring continues</p>
+              <SpineGlyph
+                size={72}
+                issue={worst?.issue ?? null}
+                stage={worst?.stage ?? 0}
+                mode={paused ? 'paused' : condition === 'issue' || condition === 'good' ? 'normal' : 'away'}
+              />
+              <p className="text-xs text-text-faint">
+                {paused ? 'Preview hidden — monitoring is paused' : 'Preview hidden — monitoring continues'}
+              </p>
             </div>
           ) : (
             <CameraFeed />
@@ -279,9 +416,9 @@ export default function Dashboard(): JSX.Element {
           <button
             type="button"
             onClick={() => patchSettings({ general: { hidePreview: !hidePreview } })}
-            className="self-end text-xs text-text-faint hover:text-text-dim"
+            className="self-end rounded text-xs text-text-faint hover:text-text-dim focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none"
           >
-            {hidePreview ? 'Show preview' : 'Hide preview (monitoring continues)'}
+            {hidePreview ? 'Show preview' : paused ? 'Hide preview' : 'Hide preview (monitoring continues)'}
           </button>
         </div>
         <div className="w-64 shrink-0 overflow-y-auto xl:w-72">

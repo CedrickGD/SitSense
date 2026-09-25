@@ -58,14 +58,20 @@ export interface GeneralSettings {
   startHidden: boolean
   /** dashboard camera preview collapsed (monitoring continues) */
   hidePreview: boolean
+  /** closing the window hides it to the tray (false = closing quits) */
+  closeToTray: boolean
 }
 
 export interface Settings {
   cameraDeviceId: string | null
+  /** label of the chosen camera — finds it again when its deviceId changes */
+  cameraLabel: string | null
   performancePreset: PerformancePreset
   delegate: 'auto' | 'GPU' | 'CPU'
   /** delegate that actually worked last run ('auto' probe result) */
   resolvedDelegate: 'GPU' | 'CPU' | null
+  /** when the GPU last failed under 'auto' — the GPU gets another try after a while */
+  gpuFailedAt: number | null
   issues: Record<IssueId, IssueSettings>
   notifications: NotificationSettings
   general: GeneralSettings
@@ -83,9 +89,11 @@ const defaultIssue = (): IssueSettings => ({
 
 export const DEFAULT_SETTINGS: Settings = {
   cameraDeviceId: null,
+  cameraLabel: null,
   performancePreset: 'balanced',
   delegate: 'auto',
   resolvedDelegate: null,
+  gpuFailedAt: null,
   issues: {
     sink: defaultIssue(),
     headForward: defaultIssue(),
@@ -102,7 +110,8 @@ export const DEFAULT_SETTINGS: Settings = {
   general: {
     launchOnStartup: false,
     startHidden: false,
-    hidePreview: false
+    hidePreview: false,
+    closeToTray: true
   },
   overlay: {
     style: 'mesh',
@@ -139,6 +148,9 @@ export function mergeSettings(persisted: unknown): Settings {
   if (!(out.performancePreset in PRESET_FPS)) out.performancePreset = 'balanced'
   if (!['auto', 'GPU', 'CPU'].includes(out.delegate)) out.delegate = 'auto'
   if (out.resolvedDelegate !== 'GPU' && out.resolvedDelegate !== 'CPU') out.resolvedDelegate = null
+  if (typeof out.gpuFailedAt !== 'number' || !Number.isFinite(out.gpuFailedAt)) out.gpuFailedAt = null
+  if (typeof out.cameraDeviceId !== 'string') out.cameraDeviceId = null
+  if (typeof out.cameraLabel !== 'string') out.cameraLabel = null
   if (!OVERLAY_STYLES.includes(out.overlay.style)) out.overlay.style = base.overlay.style
   if (out.overlay.color !== 'posture' && out.overlay.color !== 'custom' && !Object.hasOwn(OVERLAY_PRESETS, out.overlay.color)) {
     out.overlay.color = base.overlay.color

@@ -4,6 +4,7 @@ dist/
 *.log
 .DS_Store
 *.local
+*.tsbuildinfo
 
 # fetched at install time by scripts/fetch-assets.mjs — never committed
 src/renderer/public/mediapipe/

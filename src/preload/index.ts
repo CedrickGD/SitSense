@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import { IPC, type SitSenseApi, type WindowControlAction } from '../shared/ipc'
+import { IPC, type SitSenseApi, type SystemSettingsPage, type WindowControlAction } from '../shared/ipc'
 import type { DetectionStatus, PostureAlert, PostureSnapshot } from '../shared/posture'
 
 function subscribe(channel: string, cb: (...args: unknown[]) => void): () => void {
@@ -17,6 +17,7 @@ const api: SitSenseApi = {
   setPause: (paused: boolean, minutes?: number | null) =>
     ipcRenderer.invoke(IPC.pauseSet, paused, minutes ?? null),
   windowControl: (action: WindowControlAction) => ipcRenderer.invoke(IPC.windowControl, action),
+  openSystemSettings: (page: SystemSettingsPage) => ipcRenderer.invoke(IPC.openSystemSettings, page),
   quitApp: () => ipcRenderer.invoke(IPC.quitApp),
 
   sendPostureUpdate: (snapshot: PostureSnapshot) => ipcRenderer.send(IPC.postureUpdate, snapshot),
@@ -28,6 +29,7 @@ const api: SitSenseApi = {
   onRequestCalibration: (cb) => subscribe(IPC.requestCalibration, cb as (...args: unknown[]) => void),
   onNavigate: (cb) => subscribe(IPC.navigate, cb as (...args: unknown[]) => void),
   onSystemResumed: (cb) => subscribe(IPC.systemResumed, cb as (...args: unknown[]) => void),
+  onSystemSuspend: (cb) => subscribe(IPC.systemSuspend, cb as (...args: unknown[]) => void),
   onWindowVisibility: (cb) => subscribe(IPC.windowVisibility, cb as (...args: unknown[]) => void)
 }
 

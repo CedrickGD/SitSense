@@ -51,7 +51,9 @@ const METRIC_KEYS = [
   'leanRoll',
   'leanTilt',
   'leanLateral',
-  'leanSigned'
+  'leanSigned',
+  'leanRollSigned',
+  'leanTiltSigned'
 ] as const
 type MetricKey = (typeof METRIC_KEYS)[number]
 
@@ -78,6 +80,8 @@ interface SubMetric {
   key: MetricKey
   bases: readonly [number, number, number]
   kind: ThresholdKind
+  /** signed twin whose sign says which way (lean only) */
+  signed?: MetricKey
 }
 
 const HEAD_FWD_SUBS: SubMetric[] = [
@@ -86,9 +90,9 @@ const HEAD_FWD_SUBS: SubMetric[] = [
   { key: 'fwdPitch', bases: THRESHOLDS.fwdPitch, kind: 'linear' }
 ]
 const LEAN_SUBS: SubMetric[] = [
-  { key: 'leanRoll', bases: THRESHOLDS.leanRoll, kind: 'linear' },
-  { key: 'leanTilt', bases: THRESHOLDS.leanTilt, kind: 'linear' },
-  { key: 'leanLateral', bases: THRESHOLDS.leanLateral, kind: 'linear' }
+  { key: 'leanRoll', bases: THRESHOLDS.leanRoll, kind: 'linear', signed: 'leanRollSigned' },
+  { key: 'leanTilt', bases: THRESHOLDS.leanTilt, kind: 'linear', signed: 'leanTiltSigned' },
+  { key: 'leanLateral', bases: THRESHOLDS.leanLateral, kind: 'linear', signed: 'leanSigned' }
 ]
 
 /**
@@ -113,6 +117,7 @@ export class PostureEngine {
   private awayStartT: number | null = null
 
   private recalOutMs = 0
+  private recalInMs = 0
   private recalSuggested = false
 
   constructor(baseline: CalibrationBaseline | null, settings: EngineSettings) {
@@ -131,6 +136,14 @@ export class PostureEngine {
     this.resetTransientState(true)
   }
 
+  /**
+   * Drops all episodes, smoothing and cooldowns — e.g. while the calibration
+   * wizard runs, so a half-built dwell against the old baseline can't fire.
+   */
+  resetEpisodes(): void {
+    this.resetTransientState(true)
+  }
+
   updateSettings(settings: EngineSettings): void {
     const prev = this.settings
     this.settings = settings
@@ -143,6 +156,13 @@ export class PostureEngine {
   }
 
   processFrame(frame: Frame, tMs: number): { snapshot: PostureSnapshot; alerts: PostureAlert[] } {
+    // no frames for a while (pause, sleep, camera restart): the smoothed state
+    // describes a posture from before the gap, and a long gap is a break
+    // like any other — it must not resume a stale dwell or episode clock
+    if (this.lastT !== null && tMs - this.lastT > AWAY_ENTER_S * 1000) {
+      this.resetTransientState(false)
+      if (tMs - this.lastT > AWAY_FULL_RESET_S * 1000) for (const issue of ISSUES) this.machines[issue].reset(true)
+    }
     // cap Δt so a stall/sleep gap contributes at most DT_CAP to any accumulator
     const dtMs = this.lastT === null ? 0 : Math.min(Math.max(0, tMs - this.lastT), DT_CAP_S * 1000)
     this.lastT = tMs
@@ -181,13 +201,17 @@ export class PostureEngine {
       }
     }
 
-    // recalibration hint: view drifted far outside the calibrated distance
+    // recalibration hint: view drifted far outside the calibrated distance —
+    // and cleared again once it has been back in range just as long
     if (active && D !== null) {
       if (D < RECAL_D_MIN || D > RECAL_D_MAX) {
         this.recalOutMs += dtMs
+        this.recalInMs = 0
         if (this.recalOutMs >= RECAL_SUGGEST_S * 1000) this.recalSuggested = true
       } else {
         this.recalOutMs = 0
+        this.recalInMs += dtMs
+        if (this.recalInMs >= RECAL_SUGGEST_S * 1000) this.recalSuggested = false
       }
     }
     // once the hint has fired and the view is still far off, all detectors are
@@ -196,13 +220,11 @@ export class PostureEngine {
 
     const alerts: PostureAlert[] = []
     const issues = {} as Record<IssueId, IssueSnapshot>
-    const leanSigned = this.smoothers.get('leanSigned')!.value
-    const direction: 'left' | 'right' | undefined =
-      leanSigned === null ? undefined : leanSigned > 0 ? 'left' : 'right'
 
     for (const issue of ISSUES) {
       const cfg = this.settings.issues[issue]
       const evalr = this.evaluateIssue(issue, cfg, raw, frameUsable, D)
+      const direction = issue === 'lean' ? this.leanDirection(evalr.dominant) : undefined
       const dataAvailable =
         evalr.available && active && this.baseline !== null && cfg.enabled && !driftSuspended
 
@@ -259,8 +281,18 @@ export class PostureEngine {
     available: boolean
     metric: number
     pitchOnly: boolean
+    /** the sub-metric driving the displayed stage (multi-metric issues) */
+    dominant: SubMetric | null
   } {
-    const none = { sevTrigger: 0 as Stage, sevRecovery: 0 as Stage, displayStage: 0 as Stage, available: false, metric: 0, pitchOnly: false }
+    const none = {
+      sevTrigger: 0 as Stage,
+      sevRecovery: 0 as Stage,
+      displayStage: 0 as Stage,
+      available: false,
+      metric: 0,
+      pitchOnly: false,
+      dominant: null
+    }
     if (!cfg.enabled || this.baseline === null) return none
     const sigma = cfg.sensitivity
     const en = cfg.notifyStages
@@ -278,7 +310,8 @@ export class PostureEngine {
           : 0,
         available,
         metric: value,
-        pitchOnly: false
+        pitchOnly: false,
+        dominant: null
       }
     }
 
@@ -291,7 +324,8 @@ export class PostureEngine {
         displayStage: stageWithin(D, THRESHOLDS.close, sigma, 'ratio', 'trigger', ALL_STAGES),
         available,
         metric: D,
-        pitchOnly: false
+        pitchOnly: false,
+        dominant: null
       }
     }
 
@@ -302,18 +336,27 @@ export class PostureEngine {
     let displayStage: Stage = 0
     let metric = 0
     let anyRawPresent = false
+    let dominant: SubMetric | null = null
+    let dominantRatio = 0
     for (const sub of subs) {
       const value = this.smoothers.get(sub.key)!.value
       if (raw[sub.key] !== undefined) anyRawPresent = true
-      if (value === null) continue
+      // a sub whose landmarks are gone this frame holds its last value — that
+      // value may be long stale (the user already sat up), so on a usable
+      // frame only the subs measured right now may carry severity (spec §5:
+      // max over the AVAILABLE sub-metrics)
+      if (value === null || (frameUsable && raw[sub.key] === undefined)) continue
       const t = stageWithin(value, sub.bases, sigma, sub.kind, 'trigger', en)
       const r = stageWithin(value, sub.bases, sigma, sub.kind, 'recovery', en)
       const d = stageWithin(value, sub.bases, sigma, sub.kind, 'trigger', ALL_STAGES)
       if (t > sevTrigger) sevTrigger = t
       if (r > sevRecovery) sevRecovery = r
-      if (d > displayStage) {
+      const ratio = value / effThreshold(sub.bases[0], sigma, sub.kind)
+      if (d > displayStage || (d === displayStage && d > 0 && ratio > dominantRatio)) {
         displayStage = d
         metric = value
+        dominant = sub
+        dominantRatio = ratio
       }
     }
     const pitchOnly =
@@ -327,8 +370,21 @@ export class PostureEngine {
       displayStage,
       available: frameUsable && anyRawPresent,
       metric,
-      pitchOnly
+      pitchOnly,
+      dominant
     }
+  }
+
+  /**
+   * Which way the user leans, from the measurement that actually drives the
+   * lean stage (a pure head roll has no lateral offset to read a side from).
+   * Positive deltas mean toward the person's left.
+   */
+  private leanDirection(dominant: SubMetric | null): 'left' | 'right' | undefined {
+    if (!dominant?.signed) return undefined
+    const v = this.smoothers.get(dominant.signed)!.value
+    if (v === null || v === 0) return undefined
+    return v > 0 ? 'left' : 'right'
   }
 
   private machineCfg(issue: IssueId): EpisodeConfig {
@@ -378,6 +434,7 @@ export class PostureEngine {
     this.scaleSmoother.reseed()
     this.gate.reset()
     this.recalOutMs = 0
+    this.recalInMs = 0
     if (fullEpisodeReset) {
       this.recalSuggested = false
       for (const issue of ISSUES) this.machines[issue].reset(true)

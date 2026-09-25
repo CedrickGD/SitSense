@@ -1,14 +1,31 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { Notification } from 'electron'
-import type { PostureAlert, Stage } from '../shared/posture'
+import { Notification, type NotificationConstructorOptions } from 'electron'
+import { IPC } from '../shared/ipc'
+import type { IssueId, PostureAlert, PostureSnapshot, Stage } from '../shared/posture'
 import { composeToast, CopyPicker } from './notification-copy'
-import { getPauseState } from './pause'
+import { getPauseState, setPause } from './pause'
 import { resourcesDir } from './resources'
 import { getSettings } from './settings-store'
-import { showMainWindow } from './window'
+import { sendToRenderer, showMainWindow } from './window'
 
 const picker = new CopyPicker()
+
+/** posture nudges carry exactly one button, so activation index 0 always means this */
+const SNOOZE_MINUTES = 15
+/** a recovered issue's nudge is withdrawn from the Action Center after this long */
+const RECOVERED_HOLD_MS = 5_000
+const MAX_LIVE = 20
+
+/**
+ * Shown toasts stay referenced: a garbage-collected Notification no longer
+ * emits click/action events, so a nudge clicked a minute later did nothing.
+ */
+const live = new Set<Notification>()
+/** the current nudge per issue — the next one replaces it (same toast tag) */
+const nudges = new Map<IssueId, Notification>()
+const recoveredSince = new Map<IssueId, number>()
+let recalibrationShown = false
 
 /**
  * Toast logo: the spine glyph bent the way this issue bends it, in the
@@ -17,6 +34,19 @@ const picker = new CopyPicker()
 function toastIcon(name: string): string | undefined {
   const file = join(resourcesDir(), 'toast', `${name}.png`)
   return existsSync(file) ? file : undefined
+}
+
+/**
+ * Handles activations whose Notification object is gone — toasts clicked from
+ * the Action Center, after a restart, or on a cold start from a toast. Live
+ * toasts also get their instance handlers; both paths are idempotent.
+ */
+export function initNotifications(): void {
+  if (process.platform !== 'win32' || typeof Notification.handleActivation !== 'function') return
+  Notification.handleActivation((details) => {
+    if (details.type === 'action') setPause(true, SNOOZE_MINUTES)
+    else showMainWindow()
+  })
 }
 
 /**
@@ -36,27 +66,109 @@ export function fireAlert(alert: PostureAlert): void {
   if (alert.kind === 'escalation' && !s.notifications.escalation) return
 
   const { title, body } = composeToast(alert, picker)
-  showToast(title, body, !s.notifications.sound, toastIcon(`${alert.issue}-${alert.stage}`))
+  const previous = nudges.get(alert.issue)
+  if (previous) live.delete(previous) // replaced in place by the shared tag below
+  const n = showToast(
+    {
+      title,
+      body,
+      silent: !s.notifications.sound,
+      icon: toastIcon(`${alert.issue}-${alert.stage}`),
+      // one Action Center entry per issue: a new nudge replaces the old one
+      id: `posture-${alert.issue}`,
+      groupId: 'posture',
+      actions: [{ type: 'button', text: `Pause ${SNOOZE_MINUTES} min` }]
+    },
+    { onAction: () => setPause(true, SNOOZE_MINUTES) }
+  )
+  if (n) nudges.set(alert.issue, n)
+  recoveredSince.delete(alert.issue)
+}
+
+/**
+ * Keeps toasts in step with posture: a nudge whose issue has been fixed for a
+ * few seconds is withdrawn, and a drifted camera view gets one heads-up per
+ * session (the engine suspends nudges until the user recalibrates).
+ */
+export function notificationsPostureUpdate(snapshot: PostureSnapshot): void {
+  const now = Date.now()
+  for (const [issue, n] of nudges) {
+    const fixed = snapshot.presence === 'active' && snapshot.issues[issue]?.stage === 0
+    if (!fixed) {
+      recoveredSince.delete(issue)
+      continue
+    }
+    const since = recoveredSince.get(issue) ?? now
+    recoveredSince.set(issue, since)
+    if (now - since >= RECOVERED_HOLD_MS) {
+      n.close()
+      live.delete(n)
+      nudges.delete(issue)
+      recoveredSince.delete(issue)
+    }
+  }
+
+  if (snapshot.recalibrationSuggested && !recalibrationShown && !getPauseState().paused) {
+    recalibrationShown = true
+    if (!getSettings().notifications.enabled) return
+    showToast(
+      {
+        title: 'The view has changed',
+        body: 'Your camera angle no longer matches your baseline, so nudges are on hold. Click to recalibrate.',
+        silent: true,
+        icon: toastIcon('good')
+      },
+      {
+        onClick: () => {
+          showMainWindow()
+          sendToRenderer(IPC.requestCalibration)
+        }
+      }
+    )
+  }
 }
 
 export function testNotification(): void {
-  showToast(
-    'SitSense test notification',
-    'Nudges will look like this. If you never see them, check Windows notification settings for SitSense.',
-    !getSettings().notifications.sound,
-    toastIcon('good')
-  )
+  showToast({
+    title: 'SitSense test notification',
+    body: 'Nudges will look like this. If you never see them, check Windows notification settings for SitSense.',
+    silent: !getSettings().notifications.sound,
+    icon: toastIcon('good')
+  })
 }
 
 export function trayHint(): void {
-  showToast('SitSense is still watching', 'Monitoring continues from the tray. Quit via the tray menu.', true)
+  showToast({
+    title: 'SitSense is still watching',
+    body: 'Monitoring continues from the tray. Quit via the tray menu.',
+    silent: true
+  })
 }
 
-function showToast(title: string, body: string, silent: boolean, icon?: string): void {
-  if (!Notification.isSupported()) return
-  const n = new Notification({ title, body, silent, ...(icon ? { icon } : {}) })
-  n.on('click', () => showMainWindow())
+function showToast(
+  options: NotificationConstructorOptions,
+  handlers: { onClick?: () => void; onAction?: () => void } = {}
+): Notification | null {
+  if (!Notification.isSupported()) return null
+  const n = new Notification(Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined)))
+  const forget = (): void => {
+    live.delete(n)
+  }
+  n.on('click', () => {
+    forget()
+    ;(handlers.onClick ?? showMainWindow)()
+  })
+  n.on('action', () => {
+    forget()
+    handlers.onAction?.()
+  })
+  n.on('close', forget)
+  n.on('failed', forget)
+  live.add(n)
+  // bounded even if Windows never reports a close
+  if (live.size > MAX_LIVE) live.delete(live.values().next().value as Notification)
   n.show()
+  return n
 }
 
 export function stageLabel(stage: Stage): string {

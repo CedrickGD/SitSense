@@ -3,7 +3,7 @@ import type { AppRoute, PauseState } from '@shared/ipc'
 import type { DetectionStatus, PostureSnapshot, TodayStats } from '@shared/posture'
 import type { Settings } from '@shared/settings'
 import type { BodyMesh } from '@renderer/overlay/bodyMesh'
-import type { PlacementCheck } from '@renderer/posture/calibration'
+import type { CalibrationFailure, PlacementCheck } from '@renderer/posture/calibration'
 import type { Landmark } from '@renderer/posture/types'
 
 export type CaptureBanner = 'hold' | null
@@ -14,7 +14,7 @@ export interface CalibrationUiState {
   /** 0..1 during capture */
   progress: number
   countdownValue: number
-  failReason: 'not-enough-frames' | 'unstable' | null
+  failReason: CalibrationFailure | null
   banner: CaptureBanner
 }
 
@@ -34,6 +34,8 @@ export interface AppState {
   meshUnavailable: boolean
   /** main window shown and not minimized */
   windowVisible: boolean
+  /** deviceId of the camera actually open (null = none / unknown) */
+  activeCameraId: string | null
   today: TodayStats | null
   appVersion: string
 
@@ -44,7 +46,7 @@ export interface AppState {
 export const useAppStore = create<AppState>((set) => ({
   settings: null,
   snapshot: null,
-  detection: { running: false, delegate: null, targetFps: 10, measuredFps: 0, cameraError: null },
+  detection: { running: false, delegate: null, targetFps: 10, measuredFps: 0, cameraError: null, modelError: false },
   pause: { paused: false, resumeAt: null },
   cameras: [],
   route: 'dashboard',
@@ -60,6 +62,7 @@ export const useAppStore = create<AppState>((set) => ({
   mesh: null,
   meshUnavailable: false,
   windowVisible: true,
+  activeCameraId: null,
   today: null,
   appVersion: '',
 

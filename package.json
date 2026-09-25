@@ -6,17 +6,22 @@
   "author": "CedrickGD",
   "license": "MIT",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "fetch-assets": "node scripts/fetch-assets.mjs",
+    "gen-icons": "node scripts/gen-icons.mjs",
     "postinstall": "node scripts/fetch-assets.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "dist": "node scripts/fetch-assets.mjs --strict && electron-vite build && electron-builder --win",
-    "dist:dir": "node scripts/fetch-assets.mjs --strict && electron-vite build && electron-builder --dir"
+    "check": "npm run typecheck && npm test",
+    "dist": "node scripts/fetch-assets.mjs --strict && npm run check && electron-vite build && electron-builder --win",
+    "dist:dir": "node scripts/fetch-assets.mjs --strict && npm run check && electron-vite build && electron-builder --dir"
   },
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",

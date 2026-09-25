@@ -7,20 +7,77 @@ const WASM_BASE = 'mediapipe/wasm'
 const MODEL_PATH = 'models/pose_landmarker_lite.task'
 const FACE_MODEL_PATH = 'models/face_landmarker.task'
 
-async function create(delegate: 'GPU' | 'CPU'): Promise<PoseLandmarker> {
+/**
+ * A MediaPipe task plus the canvas its WebGL context lives on. MediaPipe's
+ * close() only closes the graph; the context (and its slot in Chromium's
+ * ~16-context budget) lingers until GC unless it's released explicitly.
+ */
+export interface VisionTask<T extends { close(): void }> {
+  task: T
+  delegate: 'GPU' | 'CPU'
+  /** the GPU delegate was tried and failed (not merely skipped on software GL) */
+  gpuFailed?: boolean
+  dispose(): void
+}
+
+function wrap<T extends { close(): void }>(task: T, delegate: 'GPU' | 'CPU', canvas: OffscreenCanvas): VisionTask<T> {
+  let disposed = false
+  return {
+    task,
+    delegate,
+    dispose() {
+      if (disposed) return
+      disposed = true
+      try {
+        task.close()
+      } catch {
+        // a broken task is exactly what gets disposed
+      }
+      loseContext(canvas)
+    }
+  }
+}
+
+function loseContext(canvas: OffscreenCanvas | HTMLCanvasElement): void {
+  try {
+    const gl = (canvas.getContext('webgl2') ?? canvas.getContext('webgl')) as WebGLRenderingContext | null
+    gl?.getExtension('WEBGL_lose_context')?.loseContext()
+  } catch {
+    // no context was ever created
+  }
+}
+
+async function createPose(delegate: 'GPU' | 'CPU'): Promise<VisionTask<PoseLandmarker>> {
   const fileset = await FilesetResolver.forVisionTasks(WASM_BASE)
-  return PoseLandmarker.createFromOptions(fileset, {
+  const canvas = new OffscreenCanvas(1, 1)
+  const task = await PoseLandmarker.createFromOptions(fileset, {
     baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+    canvas,
     runningMode: 'VIDEO',
     numPoses: 1,
     minPoseDetectionConfidence: 0.5,
     minTrackingConfidence: 0.5
   })
+  return wrap(task, delegate, canvas)
 }
 
-function webgl2Available(): boolean {
+/**
+ * Whether the GPU delegate is worth trying: WebGL2 on real hardware. On a
+ * software rasterizer (SwiftShader) the "GPU" delegate is slower than the
+ * CPU one, which runs on XNNPACK.
+ */
+function hardwareWebgl2(): boolean {
   try {
-    return document.createElement('canvas').getContext('webgl2') !== null
+    const probe = document.createElement('canvas')
+    const gl = probe.getContext('webgl2')
+    let ok = gl !== null
+    if (gl) {
+      const info = gl.getExtension('WEBGL_debug_renderer_info')
+      const renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER))
+      ok = !/swiftshader|llvmpipe|software|basic render/i.test(renderer)
+    }
+    loseContext(probe) // a probe must not hold on to a context
+    return ok
   } catch {
     return false
   }
@@ -31,42 +88,40 @@ function webgl2Available(): boolean {
  * inference, so the caller must also route a failed first detect through
  * recreateAsCpu().
  */
-export async function createLandmarker(
-  preference: 'auto' | 'GPU' | 'CPU'
-): Promise<{ landmarker: PoseLandmarker; delegate: 'GPU' | 'CPU' }> {
-  const tryGpu = preference === 'GPU' || (preference === 'auto' && webgl2Available())
+export async function createLandmarker(preference: 'auto' | 'GPU' | 'CPU'): Promise<VisionTask<PoseLandmarker>> {
+  const tryGpu = preference === 'GPU' || (preference === 'auto' && hardwareWebgl2())
   if (tryGpu) {
     try {
-      return { landmarker: await create('GPU'), delegate: 'GPU' }
+      return await createPose('GPU')
     } catch (err) {
       console.warn('[landmarker] GPU delegate failed, falling back to CPU:', err)
+      return { ...(await createPose('CPU')), gpuFailed: true }
     }
   }
-  return { landmarker: await create('CPU'), delegate: 'CPU' }
+  return createPose('CPU')
 }
 
-export async function recreateAsCpu(old: PoseLandmarker | null): Promise<PoseLandmarker> {
-  try {
-    old?.close()
-  } catch {
-    // already broken — that's why we're here
-  }
-  return create('CPU')
+export async function recreateAsCpu(old: VisionTask<PoseLandmarker> | null): Promise<VisionTask<PoseLandmarker>> {
+  old?.dispose()
+  return createPose('CPU')
 }
 
 /**
  * Face mesh for the preview's wireframe only — posture never depends on it,
  * and it only exists while a mesh preview is on screen.
  */
-export async function createFaceLandmarker(delegate: 'GPU' | 'CPU'): Promise<FaceLandmarker> {
+export async function createFaceLandmarker(delegate: 'GPU' | 'CPU'): Promise<VisionTask<FaceLandmarker>> {
   const fileset = await FilesetResolver.forVisionTasks(WASM_BASE)
-  return FaceLandmarker.createFromOptions(fileset, {
+  const canvas = new OffscreenCanvas(1, 1)
+  const task = await FaceLandmarker.createFromOptions(fileset, {
     baseOptions: { modelAssetPath: FACE_MODEL_PATH, delegate },
+    canvas,
     runningMode: 'VIDEO',
     numFaces: 1,
     minFaceDetectionConfidence: 0.5,
     minTrackingConfidence: 0.5
   })
+  return wrap(task, delegate, canvas)
 }
 
 let topology: FaceTopology | null = null

@@ -1,26 +1,28 @@
-import { app, ipcMain } from 'electron'
-import { IPC, type AppStatus, type WindowControlAction } from '../shared/ipc'
-import type { DetectionStatus, PostureAlert, PostureSnapshot } from '../shared/posture'
+import { app, ipcMain, shell } from 'electron'
+import { IPC, type AppStatus, type SystemSettingsPage, type WindowControlAction } from '../shared/ipc'
 import { applyAutostart } from './autostart'
-import { fireAlert, testNotification } from './notifications'
+import { fireAlert, notificationsPostureUpdate, testNotification } from './notifications'
 import { getPauseState, setPause } from './pause'
 import { getSettings, updateSettings } from './settings-store'
 import { getTodayStats, statsPostureUpdate } from './stats'
-import { refreshTray, trayPostureUpdate } from './tray'
+import { refreshTray, trayDetectionStatus, trayPostureUpdate } from './tray'
+import { isDetectionStatus, isPauseRequest, isPostureAlert, isPostureSnapshot } from './validate'
 import { getMainWindow, isMainWindowVisible, markQuitting, sendToRenderer } from './window'
 
-let lastDetectionStatus: DetectionStatus | null = null
-
-export function getLastDetectionStatus(): DetectionStatus | null {
-  return lastDetectionStatus
+/** the only URIs the renderer can make the shell open */
+const SYSTEM_SETTINGS: Record<SystemSettingsPage, string> = {
+  'camera-privacy': 'ms-settings:privacy-webcam',
+  camera: 'ms-settings:camera'
 }
 
 export function registerIpc(): void {
   ipcMain.handle(IPC.settingsGet, () => getSettings())
 
   ipcMain.handle(IPC.settingsSet, (_e, patch: unknown) => {
+    const wasAutostart = getSettings().general.launchOnStartup
     const merged = updateSettings(patch)
-    applyAutostart(merged)
+    // only a real toggle touches the Run key — slider drags must not rewrite it
+    if (merged.general.launchOnStartup !== wasAutostart) applyAutostart(merged)
     sendToRenderer(IPC.settingsChanged, merged)
     refreshTray()
     return merged
@@ -39,15 +41,21 @@ export function registerIpc(): void {
 
   ipcMain.handle(IPC.notifyTest, () => testNotification())
 
-  ipcMain.handle(IPC.pauseSet, (_e, paused: boolean, minutes: number | null) => {
-    return setPause(paused, minutes)
+  ipcMain.handle(IPC.pauseSet, (_e, paused: unknown, minutes: unknown) => {
+    if (!isPauseRequest(paused, minutes)) return getPauseState()
+    return setPause(paused as boolean, (minutes as number | null | undefined) ?? null)
   })
 
   ipcMain.handle(IPC.windowControl, (_e, action: WindowControlAction) => {
     const win = getMainWindow()
     if (!win) return
     if (action === 'minimize') win.minimize()
-    else win.close() // intercepted by close-to-tray
+    else if (action === 'hide') win.close() // intercepted by close-to-tray
+  })
+
+  ipcMain.handle(IPC.openSystemSettings, (_e, page: unknown) => {
+    const uri = SYSTEM_SETTINGS[page as SystemSettingsPage]
+    if (typeof uri === 'string' && process.platform === 'win32') void shell.openExternal(uri)
   })
 
   ipcMain.handle(IPC.quitApp, () => {
@@ -55,16 +63,19 @@ export function registerIpc(): void {
     app.quit()
   })
 
-  ipcMain.on(IPC.postureUpdate, (_e, snapshot: PostureSnapshot) => {
+  ipcMain.on(IPC.postureUpdate, (_e, snapshot: unknown) => {
+    if (!isPostureSnapshot(snapshot)) return
     trayPostureUpdate(snapshot)
     statsPostureUpdate(snapshot)
+    notificationsPostureUpdate(snapshot)
   })
 
-  ipcMain.on(IPC.alertFire, (_e, alert: PostureAlert) => {
-    fireAlert(alert)
+  ipcMain.on(IPC.alertFire, (_e, alert: unknown) => {
+    if (isPostureAlert(alert)) fireAlert(alert)
   })
 
-  ipcMain.on(IPC.detectionStatus, (_e, status: DetectionStatus) => {
-    lastDetectionStatus = status
+  ipcMain.on(IPC.detectionStatus, (_e, status: unknown) => {
+    if (!isDetectionStatus(status)) return
+    trayDetectionStatus(status)
   })
 }

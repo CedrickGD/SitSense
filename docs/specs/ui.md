@@ -119,25 +119,29 @@ Scale: 12 / 13 (base UI) / 15 / 18 / 24 / 34 / 48px. Base UI text is 13px `text-
 - Overlay color (`overlay.color`): **Posture** follows the stage colors (sage → amber → ember → coral). A fixed hue (ice, cyan, violet, magenta, lime, gold, white or a custom pick) stays constant, and the body region of each active issue glows in that issue's stage color (head for head-forward/too-close, neck for slouching, shoulders for leaning).
 - Mesh work (segmentation output + face landmarker) runs only while a mesh preview is mounted **and** the window is visible. In the tray, the app runs pose detection only. If segmentation is unavailable, the mesh styles fall back to the skeleton.
 - Top-left chip: `● Monitoring` (sage dot, pulses gently) / `⏸ Paused · 12:41 left` (slate-cool) / `● Off` (faint).
+- While paused the camera is released, so the frame says `Camera is off while paused` (camera-slash icon) rather than showing a blank feed.
+- The preview `<video>` is detached while the window is hidden, and the store isn't fed per frame then; detection itself keeps running.
 - Top-right chip: `on-device` — tiny shield icon, `text-faint`, always present. Trust in the pixels.
 - A faint vertical **plumb line** through the calibrated center — the alignment motif carried over from calibration. 1px, `white/10`.
 - Preview can be collapsed via an eye-slash button (bottom-right of frame) → replaced by a static illustration of the spine glyph; monitoring continues. Label on hover: "Hide preview (monitoring continues)".
 
 **Status column (right, ~40%).**
 1. **Spine Glyph**, 96px tall, centered, with breathing glow.
-2. **Status line** — Bricolage 34px: `Good`, or issue + stage: `Slouching` with a stage pill below it (`slight` amber / `clear` ember / `severe` coral, `rounded-full px-2 text-xs`). Sub-line in Plex Mono 13px `text-dim`: `47 min in good posture` or `for 2m 10s` (duration of current issue).
+2. **Status line** — Bricolage 34px: `Good`, or issue + stage: `Slouching` with a stage pill below it (`slight` amber / `clear` ember / `severe` coral, `rounded-full px-2 text-xs`). Sub-line in Plex Mono 13px `text-dim`: `47 min in good posture` (`Sitting well.` for the first minute — the clock only ticks every 15 s) or `for 2m 10s` (duration of current issue). Other states get their own word and sub-line: `Paused` + countdown, `Not calibrated`, `Camera unavailable`, `Can't start` (model failed), `Starting…`, `Away`.
 3. **Detected now** — list of active issue rows (usually 0–2): stage-colored dot, issue name, live duration in Plex Mono. Empty state: `Nothing detected — sitting well.` in `text-faint`. Rows animate in/out with a 150ms fade.
-4. **Controls card:** "Monitoring" label + toggle (sage when on). Below it a **Pause** split button: clicking the label pauses 15 min; the `▾` opens a menu — `15 minutes · 30 minutes · 60 minutes · Until I resume`. While paused the button becomes a sage **Resume** button with countdown: `Resume — 12:41`.
+4. **Controls card:** "Monitoring" label + toggle (sage when on). Below it a **Pause** split button: clicking the label pauses 15 min; the `▾` opens a menu — `15 minutes · 30 minutes · 60 minutes · Until I resume`. While paused the button becomes a sage **Resume** button with countdown: `Resume — 12:41`. The controls card sits directly under the status line, so it stays reachable at the minimum window size however many cards follow.
+   - The menu renders in a portal with fixed positioning (a scrolling column can't clip it) and flips upward when there's no room below. Keyboard: Enter/↓ opens it with focus on the first item, arrows/Home/End move, Escape closes and returns focus to `▾`, Tab closes.
+5. **Hint cards** (only while watching): `Different camera` when the active camera isn't the one the baseline was captured with, and `The view has changed` while the engine suggests recalibration. Both offer **Recalibrate**; neither is sticky — they disappear on their own once the condition clears.
 
 **Today strip (bottom, full width, `card`).**
-- Left: big stat — Bricolage 24px `82%` + label `aligned today`; then Plex Mono pair `4h 06m good · 54m slouching`.
-- Right (fills remaining width): **posture timeline** — a 24px-tall horizontal bar from first activity to now, built from per-minute segments colored `sage-deep` / `amber` / `ember` / `coral`, gaps (away/paused) in `ink` with a dotted top edge. Hover any segment → Plex Mono tooltip: `14:20 – 14:26 · Head forward (clear)`. No axis clutter; just start-time and "now" labels at the ends in `text-faint` 12px.
+- Left: big stat — Bricolage 24px `82%` + label `aligned`; then Plex Mono pair `4h 06m good · 54m poor posture`. Before any tracked minute: `No tracked time yet`.
+- Right (fills remaining width): **posture timeline** — a 24px-tall horizontal bar from first activity to now, built from per-minute segments colored `sage-deep` / `amber` / `ember` / `coral`, gaps (away/paused) in `ink` with a dotted top edge. Hover or focus (arrow keys move along the bar) any segment → Plex Mono tooltip: `14:20 – 14:26 · Head forward (clear)`, also announced via `aria-live`. The strip only polls today's stats while the window is visible. No axis clutter; just start-time and "now" labels at the ends in `text-faint` 12px.
 
 ---
 
 ## 4. Calibration wizard
 
-Runs full-window (rail hidden, titlebar remains), first launch and via Calibrate icon. Three steps, progress shown as three small labeled dots top-center (`Position · Capture · Done`). Persistent `Back` (ghost) bottom-left, `Esc` cancels with confirm if mid-capture.
+Runs full-window (rail hidden, titlebar remains), first launch and via Calibrate icon. Three steps, progress shown as three small labeled dots top-center (`Position · Capture · Done`). `Esc` steps back: it stops a running capture, returns from Capture to Position, and leaves from Position. While paused, a notice with **Resume** replaces the checklist verdict — the wizard can't see anything until monitoring resumes, and `Continue`/`Capture` stay disabled while no frames arrive.
 
 **Step 1 — Position check.** Split layout: live preview left (with plumb line + a faint dashed silhouette target of head-and-shoulders), checklist card right, updating live:
 
@@ -155,7 +159,7 @@ closer to eye level.
 
 Each row: sage check / amber half-dot / coral cross + name. A verdict line beneath: `Placement: good` (sage) / `Placement: workable — tracking may be less precise` (amber) / `Placement: not usable yet` (coral, disables Continue). Camera picker dropdown sits above the checklist for quick device switching. Primary button: **Continue** (enabled at "workable" or better).
 
-**Step 2 — Sit upright.** Preview centered and larger. Headline (Bricolage 24px): `Sit the way you'd like to sit all day.` Sub: `Upright but relaxed — shoulders level, screen at eye height. We'll use this as your baseline.` Primary button **Capture my baseline** starts a 3-2-1 countdown (Bricolage 48px numerals over the preview, conic sage ring), then a 5s hold with the ring filling and the copy `Hold it… capturing` in Plex Mono. If tracking quality drops mid-capture, the ring pauses amber with `Hold still — re-acquiring` and resumes. On success: the skeleton overlay flashes sage and settles.
+**Step 2 — Sit upright.** Preview centered and larger. Headline (Bricolage 24px): `Sit the way you'd like to sit all day.` Sub: `Upright but relaxed — shoulders level, screen at eye height. We'll use this as your baseline.` Primary button **Capture my baseline** starts a 3-2-1 countdown (Bricolage 48px numerals over the preview, conic sage ring), then a 5s hold with the ring filling and the copy `Hold it… capturing` in Plex Mono. If tracking quality drops mid-capture, the ring pauses amber with `Hold still — re-acquiring` and resumes. A `Cancel capture` button replaces the primary while counting down or capturing. On success: the skeleton overlay flashes sage and settles. Failures name the cause: not enough clear frames, not steady, head turned away (`face the camera while capturing`), or the camera stopped mid-capture — each with `Retry capture`.
 
 **Step 3 — Done.** The Spine Glyph draws itself in segment-by-segment (staggered 60ms), sage, breathing. Headline: `Baseline captured.` Sub: `SitSense now measures every frame against this posture. Recalibrate any time you move your desk or camera.` Buttons: **Start monitoring** (primary) · `Redo capture` (ghost). Footnote in `text-faint`: `Your baseline is stored only on this device.`
 
@@ -163,18 +167,18 @@ Each row: sage check / amber half-dot / coral cross + name. A verdict line benea
 
 ## 5. Settings
 
-Two-pane: sticky section list left (160px: Camera · Detection · Notifications · General), scrollable content right, sections as cards. Every control commits immediately — no Save button; a transient inline `Saved` fade appears next to changed controls (`text-faint`, 1s).
+A sticky section nav across the top (`Camera · Camera overlay · Detection · Notifications · General`, the section in view highlighted), sections as cards below. Every control commits immediately — no Save button; a transient inline `Saved` fade appears next to changed controls (`text-faint`, 1s). Every control has an accessible name; segmented controls are radio groups with arrow-key navigation.
 
-**Camera.** Device dropdown with a 120px live thumbnail preview beside it, refreshing on change. Below: `Recalibrate baseline` (secondary button) with subtext `Recommended after moving your camera or desk.` and last-calibrated timestamp in Plex Mono.
+**Camera.** Device dropdown with a 120px live thumbnail preview beside it, refreshing on change. The choice is stored with its label, so a camera whose id changed (new USB port, driver update) is found again; if the chosen camera is missing the row says which one is used meanwhile. Below: `Recalibrate baseline` (secondary button) with subtext `Recommended after moving your camera or desk.` and last-calibrated timestamp in Plex Mono — or, when the baseline came from another camera, a hint to recalibrate.
 
 **Camera overlay.** A live preview of the feed, then `Style` (segmented: `Mesh · Hologram · Skeleton · Off`, with a one-line description of each) and `Color`: a conic "posture" swatch, seven preset swatches and a custom color picker. The subtext explains the choice: `Follows your posture…` or `Your color, always — the problem area still lights up in its warning color.`
 
-**Detection.** One row-card per issue — `Slouching` · `Head forward` · `Leaning to one side` · `Too close to screen`. Each row: a 20px mini-glyph of that issue's spine deformation (instant recognition), issue name, an enable toggle, and a **sensitivity slider** (5 steps, endpoints labeled `Relaxed … Strict`, thumb in sage; disabled rows collapse the slider and dim to 40%). Sub-label under the slider explains the current step in plain words, e.g. `Strict — flags small departures from your baseline.` Bottom of section: `Performance` segmented control — `Efficient (5 fps) · Balanced (10 fps) · Responsive (15 fps)` with subtext `Higher settings react faster and use more CPU.`
+**Detection.** One row-card per issue — `Slouching` · `Head forward` · `Leaning to one side` · `Too close to screen`. Each row: a 20px mini-glyph of that issue's spine deformation (instant recognition), issue name, an enable toggle, and a **sensitivity slider** (5 steps, endpoints labeled `Relaxed … Strict`, thumb in sage; disabled rows collapse the slider and dim to 40%). Sub-label under the slider explains the current step in plain words, e.g. `Strict — flags small departures from your baseline.` Bottom of section: `Performance` segmented control — `Efficient (5 fps) · Balanced (10 fps) · Responsive (15 fps)` with subtext `Higher settings react faster and use more CPU.`, followed by what's actually running (`Running on the GPU at 10 fps`).
 
 **Notifications.** The 4×3 problem is solved with a *threshold* model, not 12 checkboxes:
 
 - Per issue, one compact row: issue name + a 3-segment control labeled **Nudge me from:** `slight | clear | severe`. Selecting `clear` means clear and severe notify, slight is tracked silently (shown on dashboard/timeline only). Segments tint with their stage color when selected. This is the whole matrix for 95% of users — four rows, one decision each.
-- A quiet disclosure beneath: `Fine-tune per stage ▾` → expands the full 4×3 checkbox grid (issues as rows, `slight / clear / severe` as columns, stage-colored checks) for non-contiguous setups. If a custom pattern is active, the row's segmented control shows `Custom` and tapping it offers `Reset to threshold`.
+- A quiet disclosure beneath: `Fine-tune per stage ▾` → expands the full 4×3 checkbox grid (issues as rows, `slight / clear / severe` as columns, stage-colored checks) for non-contiguous setups. If a custom pattern is active, the row's segmented control shows `Custom` and tapping it offers `Reset to threshold`. With every stage unchecked the row reads `Never`, with the same reset.
 
 Behavior card below:
 - `Wait before nudging` — slider 5–30s, value in Plex Mono: `10 s of sustained poor posture`.
@@ -182,7 +186,7 @@ Behavior card below:
 - `Escalate if it gets worse` — toggle, subtext `A worsening stage notifies immediately, even during the quiet period.`
 - `Sound` — toggle + a soft two-note chime preview button (`Play`).
 
-**General.** Toggles: `Start with Windows` · `Start minimized to tray` · `Keep running when the window is closed` (on by default). Footer row: version, `Reset all settings` (ghost, coral text, confirm dialog).
+**General.** Toggles: `Start with Windows` · `Start minimized to tray` · `Keep running when the window is closed` (on by default; off means closing the window quits). Footer row: version, `Reset all settings` (ghost, confirm dialog — keeps the baseline and camera choice, and doesn't replay onboarding), `Quit SitSense`.
 
 ---
 
@@ -237,11 +241,14 @@ All use the same `EmptyState` pattern, centered in the preview area: a 64px line
 
 | State | Illustration | Headline | Body | Actions |
 |---|---|---|---|---|
-| No camera found | camera outline, empty lens | **No camera detected** | Connect a webcam, then scan again. SitSense needs one to see your posture. | `Scan for cameras` · `Open Windows camera settings` |
+| No camera found | camera outline, empty lens | **No camera detected** | Connect a webcam, then scan again. SitSense needs one to see your posture. | `Scan for cameras` · `Open camera settings` |
 | Camera in use | camera with a small lock badge | **Your camera is busy** | Another app is using {device name}. Close it, or pick a different camera. | `Try again` · `Choose another camera` |
 | Permission denied | camera behind a barred shield | **Camera access is off** | Windows is blocking camera access for desktop apps. Allow it in Privacy settings, then come back. | `Open privacy settings` · `Check again` |
 | Away / out of frame | empty chair, dotted silhouette | **Looks like you stepped away** | Monitoring resumes the moment you're back in frame. Time away isn't counted against your day. | *(none — auto-recovers; tray goes to Away state after 30s out of frame)* |
-| Calibration lost (camera moved) | tilted plumb line | **The view has changed** | Your camera angle no longer matches your baseline, so readings may be off. | `Recalibrate` · `Ignore for today` |
+| Model failed to load | — | **Couldn't start posture detection** | The posture model failed to load on this machine. SitSense keeps retrying; reinstalling usually fixes a damaged install. | `Retry now` |
+| Calibration lost (camera moved) | tilted plumb line | **The view has changed** | Your camera angle no longer matches your baseline, so nudges are on hold until you recalibrate. | `Recalibrate` (a dashboard card plus a one-time toast; clears itself once the view is back in range) |
+
+The Windows settings buttons open fixed `ms-settings:` pages through an allowlist in main (`camera`, `camera-privacy`); the renderer can't open arbitrary URLs. In a narrow preview (minimum window size) the empty states shrink via a container query so their actions stay visible.
 
 "Away" also renders on the timeline as neutral gaps, never as slouching.
 

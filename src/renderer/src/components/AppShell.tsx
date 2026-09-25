@@ -79,7 +79,7 @@ function NavRail(): JSX.Element {
   const route = useAppStore((s) => s.route)
   const setRoute = useAppStore((s) => s.setRoute)
   return (
-    <nav className="flex w-14 shrink-0 flex-col items-center justify-between bg-surface py-3">
+    <nav aria-label="Main" className="flex w-14 shrink-0 flex-col items-center justify-between bg-surface py-3">
       <div className="flex flex-col gap-1">
         {NAV.map((item) => {
           const active = route === item.route
@@ -89,6 +89,7 @@ function NavRail(): JSX.Element {
               type="button"
               title={item.label}
               aria-label={item.label}
+              aria-current={active ? 'page' : undefined}
               onClick={() => setRoute(item.route)}
               className={`relative flex h-11 w-11 items-center justify-center rounded-xl transition-colors focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none ${
                 active ? 'text-sage' : 'text-text-faint hover:bg-white/5 hover:text-text-dim'

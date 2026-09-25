@@ -47,6 +47,8 @@ export class EpisodeMachine {
   private escAccumMs = 0
   private recAccumMs = 0
   private cooldownUntil: number | null = null
+  /** stage of the last alert before the running cooldown began */
+  private cooldownStage: Stage = 0
 
   constructor(issue: IssueId, cfg: EpisodeConfig) {
     this.issue = issue
@@ -72,6 +74,7 @@ export class EpisodeMachine {
     this.lastT = null
     if (clearCooldown) {
       this.cooldownUntil = null
+      this.cooldownStage = 0
       this.lastAlertT = null
     }
   }
@@ -89,7 +92,12 @@ export class EpisodeMachine {
       // timers freeze; a long outage resets the episode silently
       if (this.phaseInternal !== 'idle') {
         this.dataLossMs += dtMs
-        if (this.dataLossMs > DATA_LOSS_RESET_S * 1000) this.toIdle()
+        if (this.dataLossMs > DATA_LOSS_RESET_S * 1000) {
+          // the user was nudged and never recovered — losing sight of them
+          // must not reopen the quiet period promised between nudges
+          if (this.phaseInternal === 'alerted' || this.phaseInternal === 'recovering') this.startCooldown(tMs)
+          this.toIdle()
+        }
       }
       return alerts
     }
@@ -122,8 +130,15 @@ export class EpisodeMachine {
           this.toIdle()
           break
         }
-        if (this.dwellAccumMs >= this.cfg.dwellS * 1000 && input.sevTrigger >= 1 && !inCooldown) {
-          alerts.push(this.fire(input.sevTrigger, 'initial', tMs))
+        // during the quiet period only a clearly worse episode may speak up —
+        // "a worsening stage notifies immediately, even during the quiet period"
+        const worseThanLast =
+          inCooldown &&
+          this.cfg.escalation &&
+          input.sevTrigger > this.cooldownStage &&
+          (this.lastAlertT === null || tMs - this.lastAlertT >= ESC_MIN_GAP_S * 1000)
+        if (this.dwellAccumMs >= this.cfg.dwellS * 1000 && input.sevTrigger >= 1 && (!inCooldown || worseThanLast)) {
+          alerts.push(this.fire(input.sevTrigger, inCooldown ? 'escalation' : 'initial', tMs))
           this.phaseInternal = 'alerted'
         }
         break
@@ -164,7 +179,7 @@ export class EpisodeMachine {
         }
         this.recAccumMs += dtMs
         if (this.recAccumMs >= REC_DWELL_S * 1000) {
-          this.cooldownUntil = tMs + this.cfg.cooldownS * 1000
+          this.startCooldown(tMs)
           this.toIdle()
         }
         break
@@ -172,6 +187,11 @@ export class EpisodeMachine {
     }
 
     return alerts
+  }
+
+  private startCooldown(tMs: number): void {
+    this.cooldownUntil = Math.max(this.cooldownUntil ?? 0, tMs + this.cfg.cooldownS * 1000)
+    this.cooldownStage = this.alertedStage
   }
 
   private fire(stage: Stage, kind: PostureAlert['kind'], tMs: number): PostureAlert {

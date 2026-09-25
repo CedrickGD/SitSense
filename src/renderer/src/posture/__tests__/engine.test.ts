@@ -142,9 +142,10 @@ describe('PostureEngine — presence', () => {
     run(e, makeFrame(), 0, 1_000)
     run(e, slouched(0.12), 1_000, 2_500) // ~1s accrued toward the 2s dwell
     run(e, null, 2_500, 17_500) // 15s away — under the 30s full-reset line
-    // returns STILL slouching: presence exits away ~1.5s in, and the frozen
-    // dwell must resume (not restart) → alert well before a fresh 2s dwell
-    const resumed = run(e, slouched(0.12), 17_500, 21_000)
+    // returns STILL slouching: presence exits away ~1.5s in (19.0s), and the
+    // frozen dwell must resume (not restart): the alert lands before 20s,
+    // while a wiped episode would need a fresh 2s dwell (≈21s)
+    const resumed = run(e, slouched(0.12), 17_500, 20_000)
     expect(resumed.alerts.filter((a) => a.issue === 'sink')).toHaveLength(1)
   })
 
@@ -153,9 +154,10 @@ describe('PostureEngine — presence', () => {
     run(e, makeFrame(), 0, 1_000)
     const first = run(e, slouched(0.12), 1_000, 7_000)
     expect(first.alerts.filter((a) => a.issue === 'sink')).toHaveLength(1)
-    run(e, null, 7_000, 40_000) // 33s away → full reset (break fixed the posture)
-    run(e, makeFrame(), 40_000, 42_500)
-    const second = run(e, slouched(0.12), 42_500, 49_000)
+    run(e, makeFrame(), 7_000, 14_000) // recovered for >5s → a 2 min cooldown is running
+    run(e, null, 14_000, 47_000) // 33s away → full reset, cooldown included
+    run(e, makeFrame(), 47_000, 49_500)
+    const second = run(e, slouched(0.12), 49_500, 56_000)
     const sinkAgain = second.alerts.filter((a) => a.issue === 'sink' && a.kind === 'initial')
     expect(sinkAgain).toHaveLength(1)
   })

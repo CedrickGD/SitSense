@@ -14,6 +14,7 @@ export const IPC = {
   notifyTest: 'notify:test',
   pauseSet: 'pause:set',
   windowControl: 'window:control',
+  openSystemSettings: 'system:open-settings',
   quitApp: 'app:quit',
 
   // renderer → main, send (fire-and-forget)
@@ -27,6 +28,7 @@ export const IPC = {
   requestCalibration: 'control:calibrate',
   navigate: 'control:navigate',
   systemResumed: 'system:resumed',
+  systemSuspend: 'system:suspend',
   windowVisibility: 'window:visibility'
 } as const
 
@@ -48,6 +50,9 @@ export interface AppStatus {
 
 export type WindowControlAction = 'minimize' | 'hide'
 
+/** Windows Settings pages the app may open — a fixed list, never a renderer-supplied URL. */
+export type SystemSettingsPage = 'camera-privacy' | 'camera'
+
 /** API surface exposed on window.sitsense by the preload script. */
 export interface SitSenseApi {
   getSettings(): Promise<Settings>
@@ -59,6 +64,7 @@ export interface SitSenseApi {
   /** minutes: 15/30/60, null = until resumed; pass paused=false to resume */
   setPause(paused: boolean, minutes?: number | null): Promise<PauseState>
   windowControl(action: WindowControlAction): Promise<void>
+  openSystemSettings(page: SystemSettingsPage): Promise<void>
   quitApp(): Promise<void>
 
   sendPostureUpdate(snapshot: PostureSnapshot): void
@@ -70,5 +76,6 @@ export interface SitSenseApi {
   onRequestCalibration(cb: () => void): () => void
   onNavigate(cb: (route: AppRoute) => void): () => void
   onSystemResumed(cb: () => void): () => void
+  onSystemSuspend(cb: () => void): () => void
   onWindowVisibility(cb: (visible: boolean) => void): () => void
 }

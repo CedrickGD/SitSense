@@ -17,6 +17,7 @@ win:
     - portable
   icon: build/icon.ico
 nsis:
+  include: build/installer.nsh # removes the autostart entry on uninstall
   oneClick: true
   perMachine: false # per-user: no UAC prompt, HKCU autostart works cleanly
   createStartMenuShortcut: true # REQUIRED for reliable toasts (AUMID shortcut)
@@ -25,3 +26,13 @@ nsis:
 portable:
   artifactName: SitSense-portable-${version}.exe
 npmRebuild: false
+# Lock down what the shipped binary accepts from its environment: no running
+# it as plain Node, no NODE_OPTIONS / --inspect injection, app code only from
+# the asar archive.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+  enableCookieEncryption: true
+  grantFileProtocolExtraPrivileges: false

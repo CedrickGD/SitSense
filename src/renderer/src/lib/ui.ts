@@ -1,4 +1,5 @@
-import type { IssueId, Stage } from '@shared/posture'
+import { useEffect, useState } from 'react'
+import type { Stage } from '@shared/posture'
 
 /** Single source of the stage → color mapping (spec: same 4 colors everywhere). */
 export const STAGE_COLOR: Record<Stage, string> = {
@@ -13,13 +14,6 @@ export const STAGE_LABEL: Record<Stage, string> = {
   1: 'slight',
   2: 'clear',
   3: 'severe'
-}
-
-export const ISSUE_SHORT: Record<IssueId, string> = {
-  sink: 'Slouching',
-  headForward: 'Head forward',
-  lean: 'Leaning',
-  tooClose: 'Too close'
 }
 
 export function formatDuration(ms: number): string {
@@ -38,4 +32,29 @@ export function formatCountdown(msLeft: number): string {
 export function formatClock(epochMinute: number): string {
   const d = new Date(epochMinute * 60_000)
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/** Re-renders every `intervalMs` while `active`, returning the current time. */
+export function useNow(intervalMs: number, active = true): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(timer)
+  }, [intervalMs, active])
+  return now
+}
+
+/** Tracks a CSS media query (e.g. a short window). */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(query)
+    const onChange = (): void => setMatches(mq.matches)
+    onChange()
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [query])
+  return matches
 }

@@ -25,26 +25,58 @@ function mapError(err: unknown): CameraOpenError {
   return new CameraOpenError('in-use', err)
 }
 
+export interface OpenedCamera {
+  stream: MediaStream
+  /** the device actually opened (may differ from the one asked for) */
+  deviceId: string | null
+  label: string | null
+}
+
+function request(deviceId: string | null): Promise<MediaStream> {
+  return navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 30 }
+    }
+  })
+}
+
+function describe(stream: MediaStream): OpenedCamera {
+  const track = stream.getVideoTracks()[0]
+  return { stream, deviceId: track?.getSettings().deviceId ?? null, label: track?.label || null }
+}
+
 /**
  * Opens the selected camera (any system camera). 640×480 is plenty for
  * upper-body landmarks and keeps the CPU-delegate fallback viable.
+ *
+ * A saved deviceId goes stale when a USB camera moves ports or Chromium's
+ * device-id salt resets. Before falling back to the default camera — which
+ * may be a different lens than the baseline was captured with — look for
+ * the same camera by its label.
  */
-export async function openCamera(deviceId: string | null): Promise<MediaStream> {
+export async function openCamera(deviceId: string | null, label: string | null = null): Promise<OpenedCamera> {
   try {
-    return await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-        frameRate: { ideal: 30 }
-      }
-    })
+    return describe(await request(deviceId))
   } catch (err) {
-    // a stale saved deviceId (unplugged cam) should fall back to any camera
-    if (deviceId && err instanceof DOMException && err.name === 'OverconstrainedError') {
-      return openCamera(null)
+    if (!deviceId || !(err instanceof DOMException) || err.name !== 'OverconstrainedError') throw mapError(err)
+  }
+  if (label) {
+    try {
+      const same = (await navigator.mediaDevices.enumerateDevices()).find(
+        (d) => d.kind === 'videoinput' && d.label === label && d.deviceId !== deviceId
+      )
+      if (same) return describe(await request(same.deviceId))
+    } catch {
+      // fall through to the default camera
     }
+  }
+  try {
+    return describe(await request(null))
+  } catch (err) {
     throw mapError(err)
   }
 }

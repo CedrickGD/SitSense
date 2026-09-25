@@ -2,6 +2,8 @@ import { join } from 'node:path'
 import { Menu, nativeImage, Tray } from 'electron'
 import {
   ISSUE_LABELS,
+  ISSUES,
+  type DetectionStatus,
   type PostureSnapshot,
   type TrayState
 } from '../shared/posture'
@@ -24,6 +26,10 @@ let icons: Partial<Record<TrayState, Electron.NativeImage>> = {}
 let callbacks: TrayCallbacks | null = null
 let lastSnapshot: PostureSnapshot | null = null
 let lastUpdateAt = 0
+let cameraError: DetectionStatus['cameraError'] = null
+let modelError = false
+/** snapshots older than this say nothing about the present (pause, sleep, stalled renderer) */
+const STALE_MS = 10_000
 let currentState: TrayState = 'off'
 let staleTimer: NodeJS.Timeout | null = null
 let countdownTimer: NodeJS.Timeout | null = null
@@ -46,7 +52,7 @@ export function createTray(cb: TrayCallbacks): void {
   tray.on('click', () => callbacks?.onOpen())
   // if the renderer stalls or hasn't started, the tray must not lie
   staleTimer = setInterval(() => {
-    if (!getPauseState().paused && lastUpdateAt && Date.now() - lastUpdateAt > 10_000) {
+    if (lastSnapshot && Date.now() - lastUpdateAt > STALE_MS) {
       lastSnapshot = null
       refreshTray()
     }
@@ -65,6 +71,19 @@ export function trayPostureUpdate(snapshot: PostureSnapshot): void {
   lastSnapshot = snapshot
   lastUpdateAt = Date.now()
   refreshTray()
+}
+
+export function trayDetectionStatus(status: DetectionStatus): void {
+  const nextModelError = status.modelError === true
+  if (status.cameraError === cameraError && nextModelError === modelError) return
+  cameraError = status.cameraError
+  modelError = nextModelError
+  refreshTray()
+}
+
+/** The last snapshot, if it still describes the present. */
+function current(): PostureSnapshot | null {
+  return lastSnapshot && Date.now() - lastUpdateAt <= STALE_MS ? lastSnapshot : null
 }
 
 let lastStatusText = ''
@@ -88,13 +107,19 @@ export function refreshTray(): void {
   syncCountdownTimer()
 }
 
+const CAMERA_ERROR_TEXT: Record<Exclude<DetectionStatus['cameraError'], null>, string> = {
+  'in-use': 'camera in use by another app',
+  denied: 'camera blocked in Windows privacy settings',
+  'not-found': 'no camera found'
+}
+
 function computeState(): TrayState {
   if (getPauseState().paused) return 'paused'
-  if (!lastSnapshot) return 'off'
-  if (!lastSnapshot.calibrated) return 'off'
-  if (lastSnapshot.presence === 'away') return 'away'
-  if (lastSnapshot.worstStage >= 3) return 'bad'
-  if (lastSnapshot.worstStage >= 1) return 'warn'
+  const snap = current()
+  if (cameraError || modelError || !snap || !snap.calibrated || snap.recalibrationSuggested) return 'off'
+  if (snap.presence === 'away') return 'away'
+  if (snap.worstStage >= 3) return 'bad'
+  if (snap.worstStage >= 1) return 'warn'
   return 'good'
 }
 
@@ -103,12 +128,18 @@ function statusText(): string {
   if (pause.paused) {
     return pause.resumeAt ? `paused, resumes in ${minutesLeft(pause.resumeAt)}` : 'paused'
   }
-  if (!lastSnapshot) return 'not detecting'
-  if (!lastSnapshot.calibrated) return 'not calibrated'
-  if (lastSnapshot.presence === 'away') return 'away'
-  if (lastSnapshot.worstStage === 0) return 'good posture'
-  const worst = Object.values(lastSnapshot.issues).reduce((a, b) => (b.stage > a.stage ? b : a))
-  return `${ISSUE_LABELS[worst.issue]} (${stageLabel(worst.stage)})`
+  if (cameraError) return CAMERA_ERROR_TEXT[cameraError]
+  if (modelError) return "posture model couldn't load, retrying"
+  const snap = current()
+  if (!snap) return 'not detecting'
+  if (!snap.calibrated) return 'not calibrated'
+  if (snap.recalibrationSuggested) return 'camera view changed, recalibrate'
+  if (snap.presence === 'away') return 'away'
+  if (snap.worstStage === 0) return 'good posture'
+  let worst = snap.issues[ISSUES[0]]
+  for (const id of ISSUES) if (snap.issues[id].stage > worst.stage) worst = snap.issues[id]
+  const minutes = worst.activeForMs !== null ? Math.floor(worst.activeForMs / 60_000) : 0
+  return `${ISSUE_LABELS[worst.issue]} (${stageLabel(worst.stage)})${minutes >= 1 ? `, ${minutes} min` : ''}`
 }
 
 function minutesLeft(resumeAt: number): string {

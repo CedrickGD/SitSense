@@ -50,10 +50,10 @@ describe('EpisodeMachine — hysteresis band', () => {
   it('holds (not resets) the dwell while in the band, then continues', () => {
     const m = new EpisodeMachine('sink', CFG)
     drive(m, { sevT: 1 }, 0, 8_000) // 8s accumulated
-    drive(m, { sevT: 0, sevR: 1 }, 8_000, 11_000) // 3s in band: held
-    // 4 more seconds of violation completes the 12s dwell
-    const alerts = drive(m, { sevT: 1 }, 11_000, 15_200)
-    expect(alerts).toHaveLength(1)
+    drive(m, { sevT: 0, sevR: 1 }, 8_000, 11_000) // 3s in band: held, not accumulated
+    // 4 more seconds of violation completes the 12s dwell — not earlier
+    expect(drive(m, { sevT: 1 }, 11_000, 14_900)).toEqual([])
+    expect(drive(m, { sevT: 1 }, 14_900, 15_200)).toHaveLength(1)
   })
 
   it('returns to idle after more than 5s continuously in the band', () => {

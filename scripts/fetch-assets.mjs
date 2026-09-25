@@ -1,9 +1,11 @@
 // Build-time asset provisioning. Runs on postinstall (and via `npm run fetch-assets`).
-// 1. Copies the MediaPipe WASM fileset out of node_modules into renderer/public
+// 1. Copies the MediaPipe WASM runtime out of node_modules into renderer/public
 //    (must keep original filenames — FilesetResolver resolves them by name).
-// 2. Downloads the pose and face landmarker models once if absent.
+// 2. Downloads the pose and face landmarker models once if absent, pinned by
+//    SHA-256 so a tampered or truncated download never ships.
 // The packaged app never touches the network; these are dev-machine steps only.
-import { cpSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -13,12 +15,14 @@ const MODELS = [
   {
     name: 'pose_landmarker_lite.task',
     url: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+    sha256: '59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a',
     why: 'The app cannot detect posture without it.'
   },
   {
     // only drives the face part of the preview's body mesh — never posture
     name: 'face_landmarker.task',
     url: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+    sha256: '64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff',
     why: 'The mesh preview falls back to a coarser face without it.'
   }
 ]
@@ -27,12 +31,20 @@ const wasmSrc = join(root, 'node_modules/@mediapipe/tasks-vision/wasm')
 const wasmDest = join(root, 'src/renderer/public/mediapipe/wasm')
 const modelDir = join(root, 'src/renderer/public/models')
 
+// FilesetResolver only ever picks the SIMD, non-module build in Chromium; the
+// module and no-SIMD variants would add ~23 MB of dead weight to the installer
+const WASM_FILES = ['vision_wasm_internal.js', 'vision_wasm_internal.wasm']
+const UNUSED_WASM = ['module', 'nosimd'].flatMap((v) => [`vision_wasm_${v}_internal.js`, `vision_wasm_${v}_internal.wasm`])
+
+const sha256 = (buf) => createHash('sha256').update(buf).digest('hex')
+
 let ok = true
 
-if (existsSync(wasmSrc)) {
+if (WASM_FILES.every((f) => existsSync(join(wasmSrc, f)))) {
   mkdirSync(wasmDest, { recursive: true })
-  cpSync(wasmSrc, wasmDest, { recursive: true })
-  console.log(`[fetch-assets] wasm fileset copied -> ${wasmDest}`)
+  for (const f of WASM_FILES) copyFileSync(join(wasmSrc, f), join(wasmDest, f))
+  for (const f of UNUSED_WASM) rmSync(join(wasmDest, f), { force: true })
+  console.log(`[fetch-assets] wasm runtime copied -> ${wasmDest}`)
 } else {
   ok = false
   console.warn('[fetch-assets] @mediapipe/tasks-vision not installed yet — run `npm run fetch-assets` after install')
@@ -40,16 +52,20 @@ if (existsSync(wasmSrc)) {
 
 for (const model of MODELS) {
   const dest = join(modelDir, model.name)
-  if (existsSync(dest) && statSync(dest).size > 1_000_000) {
-    console.log(`[fetch-assets] ${model.name} already present`)
-    continue
+  if (existsSync(dest)) {
+    if (sha256(readFileSync(dest)) === model.sha256) {
+      console.log(`[fetch-assets] ${model.name} already present`)
+      continue
+    }
+    console.warn(`[fetch-assets] ${model.name} doesn't match its pinned hash — downloading it again`)
   }
   try {
     console.log(`[fetch-assets] downloading ${model.name} ...`)
     const res = await fetch(model.url)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const buf = Buffer.from(await res.arrayBuffer())
-    if (buf.length < 1_000_000) throw new Error(`suspiciously small download (${buf.length} bytes)`)
+    const got = sha256(buf)
+    if (got !== model.sha256) throw new Error(`checksum mismatch (got ${got})`)
     mkdirSync(modelDir, { recursive: true })
     writeFileSync(dest, buf)
     console.log(`[fetch-assets] model saved (${(buf.length / 1e6).toFixed(1)} MB) -> ${dest}`)

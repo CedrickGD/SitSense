@@ -5,7 +5,7 @@ import { detectionController } from '@renderer/detection/controller'
 import { LM } from '@renderer/posture/constants'
 import type { Landmark } from '@renderer/posture/types'
 import { useAppStore } from '@renderer/state/store'
-import { STAGE_COLOR } from '@renderer/lib/ui'
+import { formatCountdown, STAGE_COLOR, useNow } from '@renderer/lib/ui'
 import MeshOverlay from './MeshOverlay'
 import { Button, EmptyState } from './primitives'
 
@@ -124,7 +124,37 @@ function PoseOverlay({
   )
 }
 
+/** Inline camera switcher for the error states ("pick a different camera"). */
+function CameraPicker(): JSX.Element | null {
+  const cameras = useAppStore((s) => s.cameras)
+  const current = useAppStore((s) => s.settings?.cameraDeviceId ?? '')
+  const patchSettings = useAppStore((s) => s.patchSettings)
+  if (cameras.length < 2) return null
+  return (
+    <select
+      aria-label="Choose another camera"
+      value={current}
+      onChange={(e) => {
+        const id = e.target.value || null
+        void patchSettings({ cameraDeviceId: id, cameraLabel: cameras.find((c) => c.deviceId === id)?.label ?? null })
+      }}
+      className="max-w-48 truncate rounded-[10px] bg-ink px-3 py-2 text-[13px] text-text ring-1 ring-white/8 focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none"
+    >
+      <option value="">Default camera</option>
+      {cameras.map((c) => (
+        <option key={c.deviceId} value={c.deviceId}>
+          {c.label}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 function CameraErrorState({ error }: { error: Exclude<CameraError, null> }): JSX.Element {
+  const cameraName = useAppStore((s) => {
+    const id = s.settings?.cameraDeviceId
+    return s.cameras.find((c) => c.deviceId === id)?.label ?? null
+  })
   const camIcon = (
     <svg width="64" height="64" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
       <rect x="6" y="18" width="36" height="28" rx="6" />
@@ -139,7 +169,14 @@ function CameraErrorState({ error }: { error: Exclude<CameraError, null> }): JSX
         icon={camIcon}
         headline="No camera detected"
         body="Connect a webcam, then scan again. SitSense needs one to see your posture."
-        actions={<Button onClick={() => detectionController.restart()}>Scan for cameras</Button>}
+        actions={
+          <>
+            <Button onClick={() => detectionController.restart()}>Scan for cameras</Button>
+            <Button variant="ghost" onClick={() => window.sitsense.openSystemSettings('camera')}>
+              Open camera settings
+            </Button>
+          </>
+        }
       />
     )
   }
@@ -148,8 +185,15 @@ function CameraErrorState({ error }: { error: Exclude<CameraError, null> }): JSX
       <EmptyState
         icon={camIcon}
         headline="Camera access is off"
-        body="Windows is blocking camera access for desktop apps. Allow it under Privacy & security → Camera, then come back."
-        actions={<Button onClick={() => detectionController.restart()}>Check again</Button>}
+        body="Windows is blocking camera access for desktop apps. Allow it in Privacy settings — SitSense checks again when you come back."
+        actions={
+          <>
+            <Button variant="primary" onClick={() => window.sitsense.openSystemSettings('camera-privacy')}>
+              Open privacy settings
+            </Button>
+            <Button onClick={() => detectionController.restart()}>Check again</Button>
+          </>
+        }
       />
     )
   }
@@ -157,8 +201,29 @@ function CameraErrorState({ error }: { error: Exclude<CameraError, null> }): JSX
     <EmptyState
       icon={camIcon}
       headline="Your camera is busy"
-      body="Another app is using the camera, or the Windows camera toggle is off. Close the other app or pick a different camera."
-      actions={<Button onClick={() => detectionController.restart()}>Try again</Button>}
+      body={`Another app is using ${cameraName ?? 'the camera'}, or the Windows camera toggle is off. Close the other app or pick a different camera.`}
+      actions={
+        <>
+          <Button onClick={() => detectionController.restart()}>Try again</Button>
+          <CameraPicker />
+        </>
+      }
+    />
+  )
+}
+
+function ModelErrorState(): JSX.Element {
+  return (
+    <EmptyState
+      icon={
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
+          <circle cx="32" cy="32" r="22" />
+          <path d="M32 20v14M32 42v2" stroke="var(--color-amber)" />
+        </svg>
+      }
+      headline="Couldn't start posture detection"
+      body="The posture model failed to load on this machine. SitSense keeps retrying; reinstalling usually fixes a damaged install."
+      actions={<Button onClick={() => detectionController.restart()}>Retry now</Button>}
     />
   )
 }
@@ -174,18 +239,23 @@ export default function CameraFeed({ showAway = true, compact = false }: CameraF
   const videoRef = useRef<HTMLVideoElement>(null)
   const [aspect, setAspect] = useState(4 / 3)
   const detection = useAppStore((s) => s.detection)
-  const overlay = useAppStore((s) => s.overlay)
+  const overlayStyleSetting = useAppStore((s) => s.settings?.overlay.style)
+  // per-frame landmarks only matter to the skeleton style — don't re-render for them otherwise
+  const overlay = useAppStore((s) => (overlayStyleSetting === 'skeleton' || s.meshUnavailable ? s.overlay : null))
   const snapshot = useAppStore((s) => s.snapshot)
   const pause = useAppStore((s) => s.pause)
   const overlaySettings = useAppStore((s) => s.settings?.overlay) ?? DEFAULT_SETTINGS.overlay
   const meshUnavailable = useAppStore((s) => s.meshUnavailable)
+  const windowVisible = useAppStore((s) => s.windowVisible)
   const overlayColor = useOverlayColor(overlaySettings)
   const problemColors = useProblemColors(overlaySettings)
 
   const wantsMesh = overlaySettings.style === 'mesh' || overlaySettings.style === 'hologram'
   const style = wantsMesh && meshUnavailable ? 'skeleton' : overlaySettings.style
   const hologram = style === 'hologram' && !pause.paused
-  const showMesh = (style === 'mesh' || style === 'hologram') && !pause.paused && !detection.cameraError
+  const error = pause.paused ? null : detection.cameraError ? 'camera' : detection.modelError ? 'model' : null
+  const showMesh = (style === 'mesh' || style === 'hologram') && !pause.paused && !error
+  const now = useNow(1000, pause.paused && pause.resumeAt !== null && !compact)
 
   useEffect(() => {
     if (!showMesh) return
@@ -199,28 +269,32 @@ export default function CameraFeed({ showAway = true, compact = false }: CameraF
       if (v.videoWidth > 0 && v.videoHeight > 0) setAspect(v.videoWidth / v.videoHeight)
     }
     v.addEventListener('loadedmetadata', onMeta)
-    // share the controller's MediaStream; reattach whenever detection restarts
+    // share the controller's MediaStream; reattach whenever detection restarts.
+    // While the window is hidden the preview is detached, so the compositor
+    // isn't decoding and painting a camera feed nobody can see.
     const attach = (): void => {
-      const stream = detectionController.getStream()
+      const stream = windowVisible ? detectionController.getStream() : null
       if (v.srcObject !== stream) {
         v.srcObject = stream
-        v.play().catch(() => undefined)
+        if (stream) v.play().catch(() => undefined)
       }
     }
     attach()
-    const timer = setInterval(attach, 1000)
+    const timer = windowVisible ? setInterval(attach, 1000) : undefined
     return () => {
       v.removeEventListener('loadedmetadata', onMeta)
       clearInterval(timer)
     }
-  }, [detection.running])
+  }, [detection.running, windowVisible])
 
   const away = showAway && snapshot?.presence === 'away'
 
   return (
-    <div className="relative aspect-video w-full overflow-hidden rounded-[20px] bg-surface ring-1 ring-white/8">
-      {detection.cameraError ? (
+    <div className="@container relative aspect-video w-full overflow-hidden rounded-[20px] bg-surface ring-1 ring-white/8">
+      {error === 'camera' && detection.cameraError ? (
         <CameraErrorState error={detection.cameraError} />
+      ) : error === 'model' ? (
+        <ModelErrorState />
       ) : (
         <>
           <video
@@ -247,6 +321,17 @@ export default function CameraFeed({ showAway = true, compact = false }: CameraF
           )}
           {/* plumb line: the calibrated center, the app's alignment motif */}
           {!pause.paused && <div className="absolute inset-y-0 left-1/2 w-px bg-white/10" />}
+          {pause.paused && !compact && (
+            // the camera is released while paused — say so instead of showing a blank frame
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className="text-text-faint" aria-hidden>
+                <path d="M3 7h3l2-2.5h8L18 7h3v12H3z" />
+                <circle cx="12" cy="13" r="3.5" />
+                <path d="M3 3l18 18" />
+              </svg>
+              <p className="text-[13px] text-text-dim">Camera is off while paused</p>
+            </div>
+          )}
           {away && (
             <div className="absolute inset-0 flex items-center justify-center bg-ink/60">
               <div className="text-center">
@@ -260,11 +345,11 @@ export default function CameraFeed({ showAway = true, compact = false }: CameraF
           <div className={`absolute top-3 left-3 ${compact ? 'hidden' : ''}`}>
             {pause.paused ? (
               <span className="flex items-center gap-1.5 rounded-full bg-ink/70 px-2.5 py-1 text-xs text-slate-cool">
-                ⏸ Paused
+                ⏸ Paused{pause.resumeAt ? ` · ${formatCountdown(pause.resumeAt - now)} left` : ''}
               </span>
             ) : detection.running ? (
               <span className="flex items-center gap-1.5 rounded-full bg-ink/70 px-2.5 py-1 text-xs text-text-dim">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sage" /> Monitoring
+                <span className="h-1.5 w-1.5 rounded-full bg-sage motion-safe:animate-pulse" /> Monitoring
               </span>
             ) : (
               <span className="rounded-full bg-ink/70 px-2.5 py-1 text-xs text-text-faint">● Off</span>

@@ -83,6 +83,8 @@ app.whenReady().then(boot);
 
 Order matters: AUMID and scheme privileges before `ready`; tray created in `ready` so the app is usable even if the window never shows; window created hidden if launched with `--hidden` (autostart).
 
+As built, a few more things happen before `ready`: an unpackaged run moves `userData` to `<userData>-dev` (before the single-instance lock, so `npm run dev` never collides with an installed tray copy), and `enable-unsafe-swiftshader` is appended (§3, landmarker). The first thing in `ready` is `lockDownNetwork()` (§2, Privacy & hardening).
+
 ### Tray with dynamic posture icon (`main/tray.ts`)
 
 - **Do not generate icons at runtime.** The main process has no canvas, and pulling in `sharp`/`jimp` for a 16px dot is bloat. Ship 4 pre-built multi-size `.ico` files (16/20/24/32/48 px frames — Windows picks the right frame per DPI automatically, so no `@2x` suffix logic needed; that convention is macOS-oriented).
@@ -101,7 +103,9 @@ Order matters: AUMID and scheme privileges before `ready`; tray created in `read
 
 ### Settings persistence (`main/settings-store.ts`)
 
-- Plain JSON at `join(app.getPath('userData'), 'settings.json')` — no dependency needed. (If you want `electron-store`: v8 is CJS, v10+ is ESM-only; with electron-vite either works, but hand-rolled is ~40 lines.) Atomic write: write `settings.json.tmp`, then `fs.renameSync`. Debounce writes 500 ms. Validate/merge with `DEFAULT_SETTINGS` on load so schema evolution never crashes.
+- Plain JSON at `join(app.getPath('userData'), 'settings.json')` — no dependency needed. (If you want `electron-store`: v8 is CJS, v10+ is ESM-only; with electron-vite either works, but hand-rolled is ~40 lines.) Debounce writes 500 ms. Validate/merge with `DEFAULT_SETTINGS` on load so schema evolution never crashes.
+- Crash safety (`main/json-file.ts`, shared with stats): write `*.tmp` with `fsync`, copy the previous file to `*.bak`, then rename. On load, a file that fails to parse is set aside as `*.corrupt-<ts>` and the `.bak` is used; only when neither is usable do defaults apply. A power cut mid-write must never cost the user their calibration.
+- The settings shape below is the original sketch; the real one lives in `shared/settings.ts` (per-issue sensitivities and notify stages, overlay style/color, `cameraLabel` to re-find a camera whose id changed, `gpuFailedAt`, `general.closeToTray`).
 - Settings shape (in `shared/settings.ts`):
 
 ```ts
@@ -127,6 +131,8 @@ app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath, args: [
 
 On boot: `process.argv.includes('--hidden')` → create window with `show: false` and skip `win.show()`. Guard: only offer/enable autostart when `app.isPackaged` (dev `electron.exe` path would be registered otherwise). Portable-exe caveat in §7.
 
+As built: the portable exe registers `PORTABLE_EXECUTABLE_FILE` (the exe the user launched), not `process.execPath` (its temp extraction dir, gone after exit). On boot, `reconcileAutostart` reads `executableWillLaunchAtLogin` and turns the setting off if the user disabled the entry in Task Manager, so the toggle never lies. The NSIS uninstaller deletes the `Run` / `StartupApproved\Run` values (named after the AUMID) unless it runs as part of an update (`build/installer.nsh`).
+
 ### Window lifecycle (`main/window.ts`)
 
 ```ts
@@ -137,8 +143,24 @@ app.on('before-quit', () => { isQuitting = true; });
 ```
 
 - First hide-to-tray: fire a one-time toast/balloon "SitSense is still watching from the tray" so users don't think it quit.
-- `webPreferences`: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: false` (electron-vite preload default), **`backgroundThrottling: false`** (critical, §4), `preload: join(__dirname, '../preload/index.js')`.
-- Set a `session.setPermissionRequestHandler` that grants only `'media'` (video) — explicit allowlist rather than Electron's permissive default.
+- `webPreferences`: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true` (the preload only `require`s `electron`, which the sandbox allows), `spellcheck: false`, **`backgroundThrottling: false`** (critical, §4), `preload: join(__dirname, '../preload/index.js')`.
+- `session.setPermissionRequestHandler` grants only `'media'` with video-only `mediaTypes`, and only to the app's own origin (`app://renderer` or the dev server); `setPermissionCheckHandler` mirrors it so `enumerateDevices()` keeps its labels. Everything else is denied — explicit allowlist rather than Electron's permissive default.
+- `will-navigate` is refused for anything but the app's own URL; `setWindowOpenHandler` denies all.
+- A crashed renderer (`render-process-gone`) is reloaded, at most 3 times per 10 minutes.
+- Closing hides to the tray only while `general.closeToTray` is on; otherwise it quits.
+
+### Privacy & hardening (`main/privacy.ts`, `main/validate.ts`)
+
+- **Egress block.** `session.webRequest.onBeforeRequest` cancels every `http(s)`/`ws(s)` request except to the dev server in an unpackaged run, and logs what it blocked. MediaPipe's own usage telemetry and Chromium's spellcheck-dictionary download are the known callers. The CSP's `connect-src 'self'` stops page-level fetches first; this catches the rest.
+- **CSP.** `index.html` carries the dev policy (inline scripts and `ws:` for Vite's refresh preamble and HMR). The `sitsense:production-csp` plugin in `electron.vite.config.ts` removes both from the built page and fails the build if it can't find the policy. `object-src`, `base-uri` and `form-action` are `'none'` everywhere.
+- **Fuses** (`electronFuses` in `electron-builder.yml`): no `ELECTRON_RUN_AS_NODE`, no `NODE_OPTIONS`, no `--inspect`, app code only from `app.asar`, no extra `file://` privileges, encrypted cookies. Playwright's `_electron` needs `--inspect`, so `scripts/drive-packaged.mjs` drives the packaged app over `--remote-debugging-port` instead.
+- **IPC validation.** Every renderer → main payload (snapshot, alert, detection status, pause request, settings patch) is shape-checked before it reaches timers, the tray, stats or toasts; a bad payload is dropped, never thrown on.
+
+### Pause and the lock screen (`main/pause.ts`)
+
+- Two reasons: `user` (tray, dashboard, toast action) and `lock`. Locking the session pauses and releases the camera; unlocking resumes, unless the user had paused anyway.
+- A user pause survives a restart (`userData/pause.json`, capped at 24 h) and is re-checked every 30 s, so a timed pause that expired while the machine slept ends on wake.
+- No `powerSaveBlocker`: an idle machine should be allowed to sleep, and `powerMonitor` `suspend` tells the renderer to drop its stream so it reacquires cleanly on resume.
 
 ---
 
@@ -195,7 +217,11 @@ Everything (`index.html`, JS, wasm, model) is served from `app://`, fetch works,
 
 ### Landmarker init with GPU→CPU fallback (`detection/landmarker.ts`)
 
-1. If `settings.delegate === 'auto'`: probe `document.createElement('canvas').getContext('webgl2')` — if null, go straight to CPU.
+1. If `settings.delegate === 'auto'`: probe `document.createElement('canvas').getContext('webgl2')` — if null, **or if the unmasked renderer is a software rasterizer** (SwiftShader, llvmpipe, Microsoft Basic Render Driver), go straight to CPU; XNNPACK beats "GPU" on software GL.
+   - MediaPipe needs WebGL even on the CPU delegate (video frames are uploaded as textures). Chromium no longer falls back to SwiftShader by itself, so on a blocklisted driver, a VM or a GPU-less session every inference would throw. Main therefore appends `enable-unsafe-swiftshader`. It only kicks in when no GPU works, and this renderer runs nothing but the app's own bundled code behind the egress block.
+   - A GPU failure is remembered with a timestamp (`gpuFailedAt`) and retried after 7 days. Skipping the GPU on software GL is not a failure and records nothing.
+   - Each task gets its own `OffscreenCanvas`; `dispose()` closes the task **and** loses its WebGL context (`WEBGL_lose_context`), since Chromium caps live contexts at ~16.
+   - A model that loads but throws on every frame is rebuilt after 10 consecutive failures, with the same 2 s → 30 s backoff as camera retries. The backoff resets only after a successful inference, so a broken model can't make the camera reopen every few seconds.
 2. `createFromOptions(..., delegate: 'GPU')` in try/catch; on throw **or** on a failed first `detectForVideo` (some GPU failures surface only at first inference), `close()` and recreate with `delegate: 'CPU'`.
 3. Persist the winning delegate via `settings:set` so subsequent launches skip the probe. Report active delegate in `detection:status` (show in UI).
 4. Timestamps: always `performance.now()`; MediaPipe throws on non-monotonic input in VIDEO mode.
@@ -235,7 +261,7 @@ timer = setInterval(() => { if (video.readyState >= 2) runDetection(); }, minInt
 
 - Timers are exempt from throttling under `backgroundThrottling: false`, so the `setInterval` path works hidden regardless of compositor behavior. At 5 fps, timer-driven sampling loses nothing vs. rVFC (rVFC's per-frame precision is irrelevant for posture).
 - `runDetection()` guards re-entrancy (skip if previous `detectForVideo` still executing — matters on CPU delegate).
-- Extra belt: `powerSaveBlocker.start('prevent-app-suspension')` in main while unpaused (stop on pause) so Windows power saving doesn't suspend the process.
+- ~~Extra belt: `powerSaveBlocker.start('prevent-app-suspension')`~~ — dropped: it kept laptops awake for no posture benefit (§2, Pause and the lock screen).
 - Explicitly do **not** use `document.visibilitychange` as the switch signal — with `backgroundThrottling: false` visibility stays `'visible'` when hidden, so the watchdog (actual rVFC starvation) is the only truthful signal.
 - Escalation path if a future Electron regresses hidden rendering: move detection into a dedicated always-hidden worker `BrowserWindow` (never shown, never closed) and make the UI window a pure viewer. The IPC contract below already supports this split — detection events flow through main either way. Not needed for v1.
 
@@ -313,7 +339,7 @@ No `extraResources` needed for wasm/model — they live in `out/renderer` via Vi
 2. **Toasts in dev / portable exe**: without an installed Start-menu shortcut bearing the AUMID, toasts may not appear or show generic identity. Dev: still call `setAppUserModelId`; accept imperfect dev toasts. Portable: document degraded notifications; NSIS is the primary distribution.
 3. **`file://` fetch failure for wasm/model** — the #1 "works in dev, broken in production" trap here. Solved by the `app://` privileged scheme (§3). Test the *packaged* build early, with networking disabled, to prove offline operation.
 4. **MediaPipe version drift**: pin `@mediapipe/tasks-vision` exactly; re-run `scripts/fetch-assets.mjs` on every dependency bump so the copied wasm matches the JS API (historical breakages: renamed/missing wasm files across minor versions).
-5. **GPU delegate failures**: driver quirks, remote-desktop sessions, and GPU blocklisting can break WebGL2 → probe + try/catch + CPU fallback + persist (§3). Also handle Electron's `child-process-gone` for GPU process crashes (recreate landmarker).
+5. **GPU delegate failures**: driver quirks, remote-desktop sessions, and GPU blocklisting can break WebGL2 → probe + try/catch + CPU fallback + persist (§3). Also handle Electron's `child-process-gone` for GPU process crashes (recreate landmarker). With no working GPU at all, WebGL only exists thanks to the SwiftShader switch (§3) — without it, even the CPU delegate fails.
 6. **Camera in use / privacy toggle**: `NotReadableError` when another app holds the camera or "Let desktop apps access your camera" is off — show a specific, actionable error state and retry with backoff; never busy-loop `getUserMedia` (it can flash the LED and log errors forever).
 7. **Tray icon vanishes after `explorer.exe` restart**: Chromium re-adds on `TaskbarCreated` in current Electron, but regressions recur. Cheap insurance: keep the `Tray` instance referenced globally (GC'd trays vanish — classic bug), and re-`setImage`/recreate the tray if a health-check detects `tray.isDestroyed()`.
 8. **Hidden-window regressions**: `backgroundThrottling: false` behavior has regressed across Electron majors repeatedly (issues #31016, #42378). The rVFC watchdog + timer fallback (§4) makes detection immune; add a soak test: hide window 30 min, assert posture updates keep arriving in main.

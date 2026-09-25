@@ -1,7 +1,9 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { readdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
-import type { PostureSnapshot, StatMinute, TodayStats } from '../shared/posture'
+import { ISSUES, type PostureSnapshot, type StatMinute, type TodayStats } from '../shared/posture'
+import { readJson, writeJsonAtomic } from './json-file'
+import { upsertMinute } from './minute-log'
 import { getPauseState } from './pause'
 
 /**
@@ -63,25 +65,32 @@ function currentStateKey(): StatMinute['s'] {
   if (!lastSnapshot.calibrated) return 'paused'
   if (lastSnapshot.presence === 'away') return 'away'
   if (lastSnapshot.worstStage === 0) return 'good'
-  const worst = Object.values(lastSnapshot.issues).reduce((a, b) => (b.stage > a.stage ? b : a))
+  let worst = lastSnapshot.issues[ISSUES[0]]
+  for (const id of ISSUES) if (lastSnapshot.issues[id].stage > worst.stage) worst = lastSnapshot.issues[id]
+  if (worst.stage === 0) return 'good'
   return `${worst.issue}:${worst.stage as 1 | 2 | 3}`
 }
 
 function sample(): void {
-  const nowMinute = Math.floor(Date.now() / 60_000)
-  if (currentMinute === -1) currentMinute = nowMinute
-  if (nowMinute !== currentMinute) {
-    finishMinute()
-    currentMinute = nowMinute
-    if (todayKey() !== loadedDate) {
-      // midnight rollover — start a fresh day file
-      flush()
-      minutes = []
-      loadedDate = todayKey()
+  try {
+    const nowMinute = Math.floor(Date.now() / 60_000)
+    if (currentMinute === -1) currentMinute = nowMinute
+    if (nowMinute !== currentMinute) {
+      finishMinute()
+      currentMinute = nowMinute
+      if (todayKey() !== loadedDate) {
+        // day changed (midnight, or a clock/DST step back into a day that
+        // already has a file) — finish this day, then pick up the new one's log
+        flush()
+        loadToday()
+      }
     }
+    const key = currentStateKey()
+    minuteCounts.set(key, (minuteCounts.get(key) ?? 0) + 1)
+  } catch (err) {
+    // a timer callback throwing would pop a main-process error dialog every 5 s
+    console.error('[stats] sample failed:', err)
   }
-  const key = currentStateKey()
-  minuteCounts.set(key, (minuteCounts.get(key) ?? 0) + 1)
 }
 
 function dominant(): StatMinute['s'] | null {
@@ -99,10 +108,7 @@ function dominant(): StatMinute['s'] | null {
 function finishMinute(): void {
   const state = dominant()
   if (state && currentMinute > 0) {
-    // an app restart within the same minute would otherwise duplicate the entry
-    const last = minutes[minutes.length - 1]
-    if (last && last.m === currentMinute) last.s = state
-    else minutes.push({ m: currentMinute, s: state })
+    upsertMinute(minutes, { m: currentMinute, s: state })
     scheduleWrite()
   }
   minuteCounts = new Map()
@@ -110,11 +116,12 @@ function finishMinute(): void {
 
 function loadToday(): void {
   loadedDate = todayKey()
-  try {
-    const raw = JSON.parse(readFileSync(join(statsDir(), `${loadedDate}.json`), 'utf8')) as TodayStats
-    if (Array.isArray(raw.minutes)) minutes = raw.minutes.filter((m) => typeof m?.m === 'number')
-  } catch {
-    minutes = []
+  const raw = readJson(join(statsDir(), `${loadedDate}.json`)) as Partial<TodayStats> | null
+  minutes = []
+  if (raw && Array.isArray(raw.minutes)) {
+    for (const m of raw.minutes) {
+      if (typeof m?.m === 'number' && typeof m?.s === 'string') upsertMinute(minutes, { m: m.m, s: m.s })
+    }
   }
 }
 
@@ -129,11 +136,8 @@ function scheduleWrite(): void {
 
 function flush(): void {
   try {
-    mkdirSync(statsDir(), { recursive: true })
-    const file = join(statsDir(), `${loadedDate || todayKey()}.json`)
-    const tmp = `${file}.tmp`
-    writeFileSync(tmp, JSON.stringify({ date: loadedDate, minutes } satisfies TodayStats))
-    renameSync(tmp, file)
+    const date = loadedDate || todayKey()
+    writeJsonAtomic(join(statsDir(), `${date}.json`), { date, minutes } satisfies TodayStats)
   } catch (err) {
     console.error('[stats] write failed:', err)
   }

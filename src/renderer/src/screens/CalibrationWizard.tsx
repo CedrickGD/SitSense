@@ -1,6 +1,6 @@
 import { useEffect, useState, type JSX } from 'react'
 import { detectionController } from '@renderer/detection/controller'
-import type { PlacementCheck } from '@renderer/posture/calibration'
+import type { CalibrationFailure, PlacementCheck } from '@renderer/posture/calibration'
 import { useAppStore } from '@renderer/state/store'
 import CameraFeed from '@renderer/components/CameraFeed'
 import SpineGlyph from '@renderer/components/SpineGlyph'
@@ -56,9 +56,59 @@ function PlacementChecklist({ placement }: { placement: PlacementCheck | null })
   )
 }
 
+/** Monitoring is paused: the wizard can't see anything until it resumes. */
+function PausedNotice(): JSX.Element {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-2xl bg-card p-4 ring-1 ring-slate-cool/30">
+      <p className="text-[13px] text-text">Monitoring is paused — resume to calibrate.</p>
+      <Button variant="primary" onClick={() => window.sitsense.setPause(false)}>
+        Resume
+      </Button>
+    </div>
+  )
+}
+
+/** Camera choice right where placement fails — no detour through Settings. */
+function WizardCameraPicker(): JSX.Element | null {
+  const cameras = useAppStore((s) => s.cameras)
+  const current = useAppStore((s) => s.settings?.cameraDeviceId ?? '')
+  const patchSettings = useAppStore((s) => s.patchSettings)
+  if (cameras.length < 2) return null
+  return (
+    <label className="flex flex-col gap-1 text-xs text-text-faint">
+      Camera
+      <select
+        value={current}
+        onChange={(e) => {
+          const id = e.target.value || null
+          void patchSettings({ cameraDeviceId: id, cameraLabel: cameras.find((c) => c.deviceId === id)?.label ?? null })
+          detectionController.startPlacementCheck()
+        }}
+        className="truncate rounded-[10px] bg-ink px-3 py-2 text-[13px] text-text ring-1 ring-white/8 focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none"
+      >
+        <option value="">Default camera</option>
+        {cameras.map((c) => (
+          <option key={c.deviceId} value={c.deviceId}>
+            {c.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+const FAIL_TEXT: Record<CalibrationFailure, string> = {
+  unstable: "Couldn't get a steady read — please hold still and retry.",
+  'face-camera': 'Your head was turned away — face the camera while capturing, then retry.',
+  interrupted: 'The camera stopped during the capture — retry once it’s back.',
+  'not-enough-frames': "Couldn't see you clearly — adjust lighting or camera placement and retry."
+}
+
 export default function CalibrationWizard(): JSX.Element {
   const [step, setStep] = useState<WizardStep>('position')
   const calibration = useAppStore((s) => s.calibration)
+  const detection = useAppStore((s) => s.detection)
+  const paused = useAppStore((s) => s.pause.paused)
   const setRoute = useAppStore((s) => s.setRoute)
 
   useEffect(() => {
@@ -71,7 +121,27 @@ export default function CalibrationWizard(): JSX.Element {
   }, [calibration.phase])
 
   const capturing = calibration.phase === 'capturing' || calibration.phase === 'countdown'
-  const canContinue = calibration.placement?.verdict === 'good' || calibration.placement?.verdict === 'workable'
+  // the placement verdict only counts while frames are actually arriving
+  const live = detection.running && !detection.cameraError && !paused
+  const canContinue =
+    live && (calibration.placement?.verdict === 'good' || calibration.placement?.verdict === 'workable')
+
+  const backToPosition = (): void => {
+    detectionController.startPlacementCheck() // un-freeze the checklist
+    setStep('position')
+  }
+
+  // Esc: stop a running capture, otherwise step back
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (capturing) detectionController.cancelCalibration()
+      else if (step === 'capture') backToPosition()
+      else if (step === 'position') setRoute('dashboard')
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [capturing, step, setRoute])
 
   return (
     <div className="flex h-full flex-col p-6">
@@ -94,7 +164,9 @@ export default function CalibrationWizard(): JSX.Element {
             <CameraFeed showAway={false} />
           </div>
           <div className="flex w-72 shrink-0 flex-col gap-4">
-            <PlacementChecklist placement={calibration.placement} />
+            {paused && <PausedNotice />}
+            <WizardCameraPicker />
+            <PlacementChecklist placement={live ? calibration.placement : null} />
             <Button variant="primary" disabled={!canContinue} onClick={() => setStep('capture')}>
               Continue
             </Button>
@@ -115,6 +187,11 @@ export default function CalibrationWizard(): JSX.Element {
               Upright but relaxed — shoulders level, screen at eye height. This becomes your baseline.
             </p>
           </div>
+          {paused && (
+            <div className="w-full max-w-xl">
+              <PausedNotice />
+            </div>
+          )}
           <div className="relative w-full max-w-xl">
             <CameraFeed showAway={false} />
             {calibration.phase === 'countdown' && (
@@ -134,49 +211,33 @@ export default function CalibrationWizard(): JSX.Element {
               </div>
             )}
           </div>
-          {calibration.phase === 'capturing' ? (
-            <p className="font-mono text-[13px] text-text-dim">
-              {calibration.banner === 'hold' ? 'Hold still — re-acquiring…' : 'Hold it… capturing'}
-            </p>
-          ) : calibration.phase === 'failed' ? (
-            <div className="text-center">
-              <p className="text-[13px] text-coral">
-                {calibration.failReason === 'unstable'
-                  ? "Couldn't get a steady read — please hold still and retry."
-                  : "Couldn't see you clearly — adjust lighting or camera placement and retry."}
+          <div aria-live="polite" className="text-center">
+            {calibration.phase === 'countdown' ? (
+              <p className="sr-only">Starting in {calibration.countdownValue}…</p>
+            ) : calibration.phase === 'capturing' ? (
+              <p className="font-mono text-[13px] text-text-dim">
+                {calibration.banner === 'hold' ? 'Hold still — re-acquiring…' : 'Hold it… capturing'}
               </p>
-              <div className="mt-3 flex justify-center gap-2">
-                <Button variant="primary" onClick={() => detectionController.beginCountdown()}>
-                  Retry capture
+            ) : calibration.phase === 'failed' && calibration.failReason ? (
+              <p className="text-[13px] text-coral">{FAIL_TEXT[calibration.failReason]}</p>
+            ) : null}
+          </div>
+          <div className="flex gap-2">
+            {capturing ? (
+              <Button variant="ghost" onClick={() => detectionController.cancelCalibration()}>
+                Cancel capture
+              </Button>
+            ) : (
+              <>
+                <Button variant="primary" disabled={!live} onClick={() => detectionController.beginCountdown()}>
+                  {calibration.phase === 'failed' ? 'Retry capture' : 'Capture my baseline'}
                 </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    detectionController.startPlacementCheck() // un-freeze the checklist
-                    setStep('position')
-                  }}
-                >
+                <Button variant="ghost" onClick={backToPosition}>
                   Back
                 </Button>
-              </div>
-            </div>
-          ) : calibration.phase !== 'countdown' ? (
-            <div className="flex gap-2">
-              <Button variant="primary" onClick={() => detectionController.beginCountdown()}>
-                Capture my baseline
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={capturing}
-                onClick={() => {
-                  detectionController.startPlacementCheck()
-                  setStep('position')
-                }}
-              >
-                Back
-              </Button>
-            </div>
-          ) : null}
+              </>
+            )}
+          </div>
         </div>
       )}
 

@@ -53,7 +53,7 @@ All length metrics are expressed in **baseline shoulder-width units** so the sam
 Per frame, the **unified scale** `s(t)`:
 
 ```
-if SHOULDERS:  s = s_sh
+if SHOULDERS and s_sh0 known:  s = s_sh      // a face-only baseline never switches to shoulder units
 elif EARS:     s = s_ear * R_ear          // R_ear = s_sh0 / s_ear0 (from calibration)
 elif EYES:     s = s_eye * R_eye          // R_eye = s_sh0 / s_eye0 (from calibration)
 else:          s = unavailable (frame likely BAD anyway)
@@ -78,7 +78,9 @@ Trigger: user clicks "Calibrate", instructed to sit upright at their normal work
 2. Capture window `CAL_DURATION = 5 s` (~50–75 frames at 10–15 fps).
 3. A calibration frame is **valid** iff pose detected AND HEAD available with `V_CAL = 0.6`, using whatever of SHOULDERS/EARS/EYES pass `V_CAL`.
 4. Require `CAL_MIN_FRAMES = 30` valid frames, else fail with "couldn't see you clearly — adjust lighting/camera and retry."
-5. For every stored quantity, aggregate with the **median** across valid frames (robust to blinks/jitter).
+5. For every stored quantity, aggregate with the **median** across valid frames (robust to blinks/jitter). Angles (`φ_head0`, `φ_sh0`) use a **circular** median, so a line near ±180° doesn't average to 0°.
+   - Frames with the head turned away are rejected: `|nose.x − face_mid.x| / face_width > MAX_CAL_YAW = 0.2` (~15–20°). A yawed face would bake a sideways offset and a narrow face width into the baseline. If most frames are rejected for this, the failure reads "face the camera and retry".
+   - A capture interrupted by camera loss fails as `interrupted` instead of timing out.
 6. Stability check: coefficient of variation of the unified scale `std(s)/median(s) ≤ CAL_MAX_CV = 0.06`, else fail with "please hold still and retry."
 
 Stored baseline (each a median):
@@ -89,6 +91,7 @@ Stored baseline (each a median):
 | `U0`, `R_ear`, `R_eye` | per section 2 | derived |
 | `y_sh0` | `sh_mid.y` | SHOULDERS |
 | `y_hd0` | `head_mid.y` | HEAD |
+| `y_hd_eye0`, `h_eye0`, `o_eye0` | the same three with the eye midpoint as head reference | EYES |
 | `h0` | `(sh_mid.y − head_mid.y) / s` (head-above-shoulder gap in current-scale units) | both |
 | `r0` | `s_face / s_sh` where `s_face = s_ear` (or `s_eye * s_ear0/s_eye0`) | both |
 | `p0` | `(P0.y − head_mid.y) / s_face` (nose-below-ears pitch proxy) | HEAD |
@@ -96,6 +99,8 @@ Stored baseline (each a median):
 | `φ_sh0` | `atan2deg(P11.y − P12.y, P11.x − P12.x)` | SHOULDERS |
 | `o0` | `(head_mid.x − sh_mid.x) / s` | both |
 | `capabilities` | which groups were calibrated (full vs face-only mode) | — |
+
+The head reference is the ear midpoint when ears were calibrated, else the eye midpoint against its own `*_eye0` twins. Mixing them — comparing an eye-based head position to an ear-based baseline — reads as ~1 cm of sink the moment an ear drops out of view.
 
 If SHOULDERS were never valid during calibration, detectors that require them (gap-shrink, face-ratio, shoulder-tilt, lateral-offset, shoulder component of sink) are permanently unavailable until recalibration; the app runs in face-only mode using the fallbacks below.
 
@@ -232,7 +237,8 @@ Transitions:
 - `RECOVERING → ALERTED`: any sub-metric `≥ thr_eff(kmin)` before the timer ends (posture relapsed; same episode, no new alert).
 - `RECOVERING → COOLDOWN`: recovery sustained `REC_DWELL = 5 s`. Episode ends. (Optional "nice, you recovered" toast — default off.)
 - `COOLDOWN → IDLE`: after `COOLDOWN_S = 120 s`. Cooldown only gates alert **emission**; detection continues underneath as described in `PENDING`.
-- `DATA_LOSS_RESET`: if a detector's required landmark groups stay unavailable for `> 10 s` (while globally ACTIVE), reset that issue `PENDING/ALERTED/RECOVERING → IDLE` silently (cooldown timers keep running).
+- `DATA_LOSS_RESET`: if a detector's required landmark groups stay unavailable for `> 10 s` (while globally ACTIVE), reset that issue `PENDING/ALERTED/RECOVERING → IDLE` silently (cooldown timers keep running). An episode that had already alerted starts a cooldown on the way out, so a flicker of lost landmarks can't re-fire the same toast.
+- **Worse during cooldown** (with escalation on): a new episode whose stage exceeds the stage the cooldown was started at fires at once as an `escalation`, instead of waiting out the quiet period. A cooldown after a slight nudge must not swallow a severe one.
 - Disabling an issue or entering calibration → `DISABLED` (silent), re-enable → `IDLE`.
 
 Alert payload: `{ issue, stage, kind: initial | escalation | reminder, metricValue, direction? }`.
@@ -247,7 +253,8 @@ States: `ACTIVE, AWAY`. Input: per-frame GOOD/BAD classification (section 1).
   - Reseed all EMAs and median buffers from current values.
   - If away duration `≤ AWAY_FULL_RESET = 30 s`: resume all issue machines exactly where they froze.
   - If away duration `> 30 s`: reset every issue machine to `IDLE` and clear cooldowns (the user stood up — the break itself fixed the posture; a fresh episode must earn a fresh dwell).
-- **Recalibration hint** (camera likely moved): if `D` stays outside `[RECAL_D_MIN, RECAL_D_MAX] = [0.5, 1.8]` continuously for `RECAL_SUGGEST_S = 10 s` while ACTIVE, show a one-shot-per-session non-alert notification suggesting recalibration, and suspend all detectors except this hint until `D` returns in range or the user recalibrates.
+- **Recalibration hint** (camera likely moved): if `D` stays outside `[RECAL_D_MIN, RECAL_D_MAX] = [0.5, 1.8]` continuously for `RECAL_SUGGEST_S = 10 s` while ACTIVE, show a one-shot-per-session non-alert notification suggesting recalibration, and suspend all detectors except this hint until `D` returns in range or the user recalibrates. `D` back in range for another `RECAL_SUGGEST_S` clears the hint.
+- **Frame gaps.** If no frame at all arrives for longer than `AWAY_ENTER` (hidden-window stall, sleep, pause), the smoothing state is reseeded as on re-entry; a gap longer than `AWAY_FULL_RESET` also resets every issue machine. Timers never integrate across a gap they didn't observe.
 
 ## 9. Per-frame pipeline (order of operations)
 

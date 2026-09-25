@@ -57,4 +57,7 @@ export interface RawMetrics {
   leanLateral?: number
   /** signed lateral offset delta, for lean direction */
   leanSigned?: number
+  /** signed head-roll / shoulder-tilt deltas (positive = toward the person's left), for lean direction */
+  leanRollSigned?: number
+  leanTiltSigned?: number
 }
