@@ -1,14 +1,20 @@
 # appId MUST match app.setAppUserModelId in src/main/index.ts —
-# Windows attributes toast notifications through it.
+# Windows attributes toast notifications through it. It is also the autostart
+# Run value name (src/main/autostart.ts, build/installer.nsh).
 appId: com.cedrickgd.sitsense
 productName: SitSense
 directories:
   buildResources: build
   output: dist
+# out/ is bundled by electron-vite. node_modules: electron-builder packs only the
+# production "dependencies" (electron-updater and its dependency closure — everything
+# else is a devDependency, bundled or build-time only). scripts/verify-package.mjs
+# FAILs any other package in the asar.
 files:
   - out/**
   - resources/**
-  - '!**/node_modules/**'
+  - '!**/node_modules/**/*.{md,markdown,map,d.ts,d.mts,d.cts,ts}'
+  - '!**/node_modules/**/{README,CHANGELOG,HISTORY,AUTHORS}*'
 asarUnpack:
   - resources/** # tray ICOs need real file paths on disk
 win:
@@ -17,11 +23,26 @@ win:
     - portable
   icon: build/icon.ico
 nsis:
+  # no spaces: latest.yml names this file, and GitHub renames uploaded assets with
+  # spaces — the name on disk must be the release asset's name exactly
+  artifactName: ${productName}-Setup-${version}.${ext}
   oneClick: true
   perMachine: false # per-user: no UAC prompt, HKCU autostart works cleanly
   createStartMenuShortcut: true # REQUIRED for reliable toasts (AUMID shortcut)
   createDesktopShortcut: true
   runAfterFinish: true
+  # customUnInstall: deletes the HKCU Run autostart value (AUTOSTART_NAME in
+  # src/main/autostart.ts) on a real uninstall, but not during an update
+  include: build/installer.nsh
 portable:
   artifactName: SitSense-portable-${version}.exe
 npmRebuild: false
+# Update feed for electron-updater (src/main/updater.ts): written into
+# resources/app-update.yml, and the nsis target writes dist/latest.yml +
+# the .blockmap. Builds never publish (`--publish never` in package.json);
+# releases are uploaded by hand (docs/specs/packaging.md "Releasing an update").
+publish:
+  provider: github
+  owner: CedrickGD # must match UPDATE_REPO in src/shared/update.ts
+  repo: SitSense
+  releaseType: release

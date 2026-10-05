@@ -1,9 +1,18 @@
+// Posture engine v2 (docs/specs/detection.md §5, §6, §8, §9).
+//
+// Per frame: features (with the baseline's gravity) → presence → scale outlier
+// gate → per-sub-metric deviations from the baseline → median-3 + EMA smoothing
+// → staged severity (max over available sub-metrics) → episode machines →
+// snapshot + alerts. Fully deterministic in (frame, tMs) — no wall clock, no
+// MediaPipe.
+
 import {
   ISSUES,
   type CalibrationBaseline,
   type IssueId,
   type IssueSnapshot,
   type PostureAlert,
+  type PostureReadout,
   type PostureSnapshot,
   type PresenceState,
   type Stage
@@ -14,24 +23,34 @@ import {
   AWAY_FULL_RESET_S,
   DT_CAP_S,
   DWELL_FACTOR,
+  HEAD_TURN_HOLD,
+  LAT_MAX_YAW,
+  LAT_GATE_HYST,
+  LAT_YAW_SLACK,
+  NECK_DROP_MAX_YAW,
   PITCH_ONLY_DWELL_MULT,
+  RECLINE_CRANE_GAIN,
   RECAL_D_MAX,
   RECAL_D_MIN,
   RECAL_SUGGEST_S,
-  SINK_D_MAX,
-  SINK_D_MIN,
+  SHOULDER_CAMERA_MAX_YAW,
+  STAGES,
+  SUB_STALE_S,
+  SWIVEL_HOLD,
+  TAU_GATE_S,
   TAU_METRIC_S,
-  TAU_SCALE_S,
-  THRESHOLDS
+  TAU_SCALE_S
 } from './constants'
 import { EpisodeMachine, type EpisodeConfig } from './episodeMachine'
-import { computeGeometry, computeRawMetrics } from './metrics'
+import { extractFeatures, type ExtractOptions } from './features'
 import { MetricSmoother, ScaleOutlierGate } from './smoothing'
-import { effThreshold, recThreshold, type ThresholdKind } from './stage'
-import type { Frame, RawMetrics } from './types'
+import { effThreshold, recThreshold } from './stage'
+import type { Frame, PostureBaseline, PostureFeatures } from './types'
+import { angleDeg, dot, neg, reject, scale, sub, unit } from './vec'
 
 export interface EngineIssueSettings {
   enabled: boolean
+  /** σ ∈ [0.5, 2]; thresholds divide by it */
   sensitivity: number
   notifyStages: [boolean, boolean, boolean]
 }
@@ -43,65 +62,199 @@ export interface EngineSettings {
   escalation: boolean
 }
 
-const METRIC_KEYS = [
-  'sink',
-  'fwdGap',
-  'fwdFace',
-  'fwdPitch',
-  'leanRoll',
-  'leanTilt',
-  'leanLateral',
-  'leanSigned'
-] as const
-type MetricKey = (typeof METRIC_KEYS)[number]
+/** Every sub-metric of §5. Lateral ones are signed (+ = toward the person's left). */
+export const SUB_METRICS = {
+  sink: ['trunkFwd', 'drop', 'torso', 'recline'],
+  headForward: ['neck', 'neckDrop', 'pitch'],
+  lean: ['trunkLat', 'neckLat', 'shoulderTilt', 'headRoll'],
+  tooClose: ['forward']
+} as const satisfies { [I in IssueId]: ReadonlyArray<keyof (typeof STAGES)[I]> }
 
-/** Severity restricted to the user-enabled stages (docs/specs/detection.md §6). */
+export type SubMetricId = (typeof SUB_METRICS)[IssueId][number]
+type RawSubs = Partial<Record<SubMetricId, number>>
+
+const ALL_SUBS: SubMetricId[] = ISSUES.flatMap((i) => [...SUB_METRICS[i]]) as SubMetricId[]
+const SIGNED: ReadonlySet<SubMetricId> = new Set<SubMetricId>(['trunkLat', 'neckLat', 'shoulderTilt', 'headRoll'])
+const ALL_STAGES: [boolean, boolean, boolean] = [true, true, true]
+
+function bases(issue: IssueId, sub: SubMetricId): readonly [number, number, number] {
+  return (STAGES[issue] as Record<string, readonly [number, number, number]>)[sub]
+}
+
+/** Severity restricted to the enabled stages; thresholds are linear (base / σ). */
 function stageWithin(
   value: number,
-  bases: readonly [number, number, number],
+  b: readonly [number, number, number],
   sigma: number,
-  kind: ThresholdKind,
   mode: 'trigger' | 'recovery',
   enabled: readonly [boolean, boolean, boolean]
 ): Stage {
   const thr = mode === 'trigger' ? effThreshold : recThreshold
   let stage: Stage = 0
-  for (let k = 0; k < 3; k++) {
-    if (enabled[k] && value >= thr(bases[k], sigma, kind)) stage = (k + 1) as Stage
-  }
+  for (let k = 0; k < 3; k++) if (enabled[k] && value >= thr(b[k], sigma, 'linear')) stage = (k + 1) as Stage
   return stage
 }
 
-const ALL_STAGES: [boolean, boolean, boolean] = [true, true, true]
-
-interface SubMetric {
-  key: MetricKey
-  bases: readonly [number, number, number]
-  kind: ThresholdKind
-}
-
-const HEAD_FWD_SUBS: SubMetric[] = [
-  { key: 'fwdGap', bases: THRESHOLDS.fwdGap, kind: 'linear' },
-  { key: 'fwdFace', bases: THRESHOLDS.fwdFace, kind: 'linear' },
-  { key: 'fwdPitch', bases: THRESHOLDS.fwdPitch, kind: 'linear' }
-]
-const LEAN_SUBS: SubMetric[] = [
-  { key: 'leanRoll', bases: THRESHOLDS.leanRoll, kind: 'linear' },
-  { key: 'leanTilt', bases: THRESHOLDS.leanTilt, kind: 'linear' },
-  { key: 'leanLateral', bases: THRESHOLDS.leanLateral, kind: 'linear' }
-]
+/**
+ * What the baseline's neckLat was measured against (older baselines did not say: their
+ * neckLat was trunk-referenced exactly when the trunk's lean was measured too).
+ */
+export const baselineNeckLatRef = (b: CalibrationBaseline): 'trunk' | 'gravity' =>
+  b.neckLatRef ?? (b.trunkLat !== null ? 'trunk' : 'gravity')
 
 /**
- * The per-frame pipeline (docs/specs/detection.md §9): geometry → presence →
- * outlier gate → smoothing → severity → episode machines → snapshot + alerts.
- * Fully deterministic in (frame, tMs) — no wall clock, no MediaPipe.
+ * The extraction options that measure a frame the way the baseline was measured: its
+ * gravity, its forward (orientation fallback and the body frame in a head + one
+ * shoulder view), and its use of the hips (hips ignored during setup — hidden or judged
+ * hallucinated — stay ignored, so every body reference matches the baseline's).
+ */
+export const extractOptionsFor = (b: CalibrationBaseline): ExtractOptions => ({
+  up: b.up,
+  upSource: b.upSource,
+  forwardHint: b.forward,
+  hips: b.trunkFwd !== null
+})
+
+/**
+ * Raw per-frame deviations from the baseline (§5). Positive = worse, except the
+ * signed lateral ones. `ppmSmoothed` rescales positions to the smoothed scale.
+ * `f` must be extracted with extractOptionsFor(b). Exported for tests and diagnostics.
+ *
+ * Holds (a sub-metric is left out, so the smoother keeps its last value):
+ * - an unknown camera tilt leaks into gravity-referenced angles as the body swivels
+ *   (≈ tilt·(cos ψ − 1) sagittally, asin(sin tilt · sin ψ) laterally). While the body is
+ *   swiveled > SWIVEL_HOLD from the baseline, the lateral gravity-referenced ones
+ *   (shoulderTilt, gravity-referenced neckLat) are held for every gravity source, and
+ *   the sagittal ones (trunkFwd, neck, neckDrop, pitch) unless gravity came from the
+ *   thighs. Head pitch is also held without thigh gravity while the head is turned
+ *   > HEAD_TURN_HOLD.
+ * - with only one ear in the frame and the head turned (or the nose hidden), every
+ *   head metric is held: the neck vector rides on that ear.
+ */
+export function computeDeviations(
+  f: PostureFeatures,
+  b: CalibrationBaseline,
+  opts: {
+    ppmSmoothed?: number | null
+    /** smoothed swivel / view yaw for the gates (default: this frame's) */
+    swivelDeg?: number | null
+    yawDeg?: number | null
+    /** lateral gate decided by the caller (the engine's hysteresis on the smoothed yaw); default: yaw < LAT_MAX_YAW */
+    lateralOk?: boolean
+    /** smoothed head yaw relative to the body (default: this frame's) */
+    headYawDeg?: number | null
+  } = {}
+): { subs: RawSubs; swivelDeg: number } {
+  const subs: RawSubs = {}
+  const U = f.up
+  const fwd0 = unit(reject(b.forward, U)) ?? b.forward
+  const frameSwivel = angleDeg(f.forward, fwd0)
+  const swivelDeg = opts.swivelDeg ?? frameSwivel
+  const yawDeg = opts.yawDeg ?? f.view.yawDeg
+  const lateralOk = opts.lateralOk ?? yawDeg < LAT_MAX_YAW
+  const swiveled = swivelDeg > SWIVEL_HOLD
+  // without thigh gravity, sagittal angles carry an unknown camera tilt that a swivel changes
+  const sagittalHeld = swiveled && b.upSource !== 'body'
+
+  // positions: rescale to the smoothed scale (anchor ∝ 1/ppm)
+  let anchor = f.anchor
+  if (anchor && f.ppm && opts.ppmSmoothed) anchor = scale(anchor, f.ppm / opts.ppmSmoothed)
+
+  // With only one ear in the frame, the neck vector rides on that ear, which a head turn
+  // moves forward/back (±7.5 cm·sin yaw): every neck-based metric is held then.
+  // (no head yaw at all = the nose is hidden: the head is turned away)
+  const headYaw = opts.headYawDeg ?? f.headYaw
+  const headTurned = headYaw === null || Math.abs(headYaw) > HEAD_TURN_HOLD
+  const headTurnedOneEar = !f.earsBoth && headTurned
+  const headHeld = headTurnedOneEar || sagittalHeld
+
+  // sink
+  if (!sagittalHeld && f.trunkFwd !== null && b.trunkFwd !== null) subs.trunkFwd = f.trunkFwd - b.trunkFwd
+  if (anchor) subs.drop = dot(sub(anchor, b.anchor), neg(U)) * 100
+  if (f.torsoLen !== null && b.torsoLen !== null && b.torsoLen > 0) subs.torso = 1 - f.torsoLen / b.torsoLen
+  // recline-slump ("lying in the chair"): the trunk reclined since the baseline AND the neck
+  // craned forward on it to keep the eyes on the screen. The neck-on-trunk change is
+  // gravity-free; the recline is a deviation of the trunk's lean, held with it. Leaning back
+  // with the head going along, or a forward head without a recline, scores ~0
+  if (!headHeld && f.trunkFwd !== null && b.trunkFwd !== null) {
+    const recline = b.trunkFwd - f.trunkFwd
+    // like with like: the gravity-free neck-on-trunk angle when the baseline has it (older
+    // baselines: the same difference of the baseline-gravity angles, where a constant tilt cancels)
+    const n0 = (b as PostureBaseline).neckOnTrunk
+    const crane =
+      typeof n0 === 'number' && typeof f.neckOnTrunk === 'number'
+        ? f.neckOnTrunk - n0
+        : f.neckFwd - f.trunkFwd - (b.neckFwd - b.trunkFwd)
+    subs.recline = Math.min(recline, RECLINE_CRANE_GAIN * crane)
+  }
+
+  // head forward
+  if (!headHeld) subs.neck = f.neckFwd - b.neckFwd
+  if (
+    !headHeld &&
+    f.neckH !== null &&
+    b.neckH !== null &&
+    b.neckH > 0 &&
+    f.view.yawDeg < NECK_DROP_MAX_YAW &&
+    b.view.yawDeg < NECK_DROP_MAX_YAW
+  ) {
+    subs.neckDrop = 1 - f.neckH / b.neckH
+  }
+  // an unknown camera tilt also leaks into head pitch as the head turns (no thigh gravity)
+  const pitchHeld = headHeld || (b.upSource !== 'body' && headTurned)
+  if (!pitchHeld && f.headPitch !== null && b.headPitch !== null) subs.pitch = f.headPitch - b.headPitch
+
+  // lean (signed, + = toward the person's left)
+  if (lateralOk && f.trunkLat !== null && b.trunkLat !== null) subs.trunkLat = f.trunkLat - b.trunkLat
+  // neckLat: only like minus like (trunk-relative vs gravity-referenced). The
+  // trunk-relative one is gravity-free; the gravity-referenced one is held on a swivel
+  if (lateralOk && f.neckLat !== null && b.neckLat !== null && f.neckLatRef === baselineNeckLatRef(b)) {
+    if (!(f.neckLatRef === 'gravity' && swiveled)) subs.neckLat = f.neckLat - b.neckLat
+  }
+  // shoulderTilt / headRollRel are "+ = left side higher", which is a tilt toward
+  // the RIGHT — negate so every lean sub-metric reads "+ = toward the left"
+  const shoulderOk = lateralOk && (b.upSource !== 'camera' || yawDeg <= SHOULDER_CAMERA_MAX_YAW)
+  if (shoulderOk && f.shoulderTilt !== null && b.shoulderTilt !== null && !swiveled) {
+    subs.shoulderTilt = -(f.shoulderTilt - b.shoulderTilt)
+  }
+  if (lateralOk && f.headRollRel !== null && b.headRollRel !== null) subs.headRoll = -(f.headRollRel - b.headRollRel)
+
+  // too close
+  if (anchor) subs.forward = dot(sub(anchor, b.anchor), fwd0) * 100
+
+  return { subs, swivelDeg: frameSwivel }
+}
+
+interface IssueEval {
+  sevTrigger: Stage
+  sevRecovery: Stage
+  displayStage: Stage
+  available: boolean
+  metric: number
+  /** signed value of the dominant sub-metric (lean direction) */
+  signed: number | null
+  pitchOnly: boolean
+}
+
+/**
+ * The per-frame pipeline. Public shape is unchanged from v1:
+ * `new PostureEngine(baseline, settings)`, `setBaseline`, `updateSettings`,
+ * `processFrame(frame, tMs) → { snapshot, alerts }`, `presenceState`; plus
+ * `lastFeatures` (overlay) and `snapshot.readout` (UI).
  */
 export class PostureEngine {
   private baseline: CalibrationBaseline | null
   private settings: EngineSettings
 
-  private smoothers = new Map<MetricKey, MetricSmoother>()
+  private smoothers = new Map<SubMetricId, MetricSmoother>()
   private scaleSmoother = new MetricSmoother(TAU_SCALE_S)
+  private swivelSmoother = new MetricSmoother(TAU_GATE_S)
+  private yawSmoother = new MetricSmoother(TAU_GATE_S)
+  /** lateral gate state (Schmitt trigger on the smoothed view yaw) */
+  private lateralOn = true
+  private headYawSmoother = new MetricSmoother(TAU_GATE_S)
+  /** last time each sub-metric had a fresh value (stale ones stop driving severity) */
+  private freshAt = new Map<SubMetricId, number>()
   private gate = new ScaleOutlierGate()
   private machines = {} as Record<IssueId, EpisodeMachine>
   private pitchOnly = false
@@ -115,15 +268,44 @@ export class PostureEngine {
   private recalOutMs = 0
   private recalSuggested = false
 
+  private features: PostureFeatures | null = null
+  private avail: Record<IssueId, boolean> = { sink: false, headForward: false, lean: false, tooClose: false }
+
   constructor(baseline: CalibrationBaseline | null, settings: EngineSettings) {
     this.baseline = baseline
     this.settings = settings
-    for (const key of METRIC_KEYS) this.smoothers.set(key, new MetricSmoother(TAU_METRIC_S))
+    for (const key of ALL_SUBS) this.smoothers.set(key, new MetricSmoother(TAU_METRIC_S))
     for (const issue of ISSUES) this.machines[issue] = new EpisodeMachine(issue, this.machineCfg(issue))
   }
 
   get presenceState(): PresenceState {
     return this.presence
+  }
+
+  /** Latest GOOD frame's features (computed with the baseline's gravity when calibrated). */
+  get lastFeatures(): PostureFeatures | null {
+    return this.features
+  }
+
+  /** Whether each issue had measurable data on the last processed frame. */
+  get availability(): Readonly<Record<IssueId, boolean>> {
+    return this.avail
+  }
+
+  /**
+   * The smoothed value of every sub-metric that is currently driving its issue (fresh
+   * within SUB_STALE_S), keyed by sub-metric (§5 units; lateral ones signed, + = toward
+   * the person's left). For diagnostics and tests.
+   */
+  get subMetrics(): Partial<Record<SubMetricId, number>> {
+    const out: Partial<Record<SubMetricId, number>> = {}
+    const now = this.lastT ?? 0
+    for (const key of ALL_SUBS) {
+      const fresh = this.freshAt.get(key)
+      const v = this.smoothers.get(key)!.value
+      if (fresh !== undefined && now - fresh <= SUB_STALE_S * 1000 && v !== null) out[key] = v
+    }
+    return out
   }
 
   setBaseline(baseline: CalibrationBaseline | null): void {
@@ -136,52 +318,64 @@ export class PostureEngine {
     this.settings = settings
     for (const issue of ISSUES) {
       this.machines[issue].updateConfig(this.machineCfg(issue))
-      if (prev.issues[issue].enabled && !settings.issues[issue].enabled) {
-        this.machines[issue].reset(false)
-      }
+      if (prev.issues[issue].enabled && !settings.issues[issue].enabled) this.machines[issue].reset(false)
     }
   }
 
   processFrame(frame: Frame, tMs: number): { snapshot: PostureSnapshot; alerts: PostureAlert[] } {
-    // cap Δt so a stall/sleep gap contributes at most DT_CAP to any accumulator
+    // no frames for longer than a full-reset absence (pause, system sleep, camera restart):
+    // presence never saw it, so treat it as that absence here — reseed and reset the episodes
+    if (this.lastT !== null && tMs - this.lastT > AWAY_FULL_RESET_S * 1000) {
+      this.badMs = 0
+      this.goodMs = 0
+      this.resetTransientState(false)
+      for (const issue of ISSUES) this.machines[issue].reset(true)
+    }
     const dtMs = this.lastT === null ? 0 : Math.min(Math.max(0, tMs - this.lastT), DT_CAP_S * 1000)
     this.lastT = tMs
     const dtS = dtMs / 1000
+    const b = this.baseline
 
-    const geo = computeGeometry(frame)
-    this.stepPresence(geo.good, dtMs, tMs)
+    // lateral features a little past the limit: the smoothed-yaw gate in computeDeviations decides
+    const f = extractFeatures(frame, b ? { ...extractOptionsFor(b), lateralMaxYaw: LAT_MAX_YAW + LAT_YAW_SLACK } : {})
+    this.features = f
+    this.stepPresence(f !== null, dtMs, tMs)
     const active = this.presence === 'active'
 
-    let raw: RawMetrics = {}
+    let raw: RawSubs = {}
     let frameUsable = false
-    if (this.baseline !== null && active && geo.good) {
-      raw = computeRawMetrics(geo, this.baseline)
-      if (raw.scale !== undefined) {
-        if (this.gate.check(raw.scale)) {
-          frameUsable = true
-          this.scaleSmoother.push(raw.scale, dtS)
-        }
-        // rejected scale = tracking glitch: discard the whole frame
+    if (b !== null && active && f !== null) {
+      if (f.ppm === null || this.gate.check(f.ppm)) {
+        frameUsable = true
+        if (f.ppm !== null) this.scaleSmoother.push(f.ppm, dtS)
+        const fwd0 = unit(reject(b.forward, f.up)) ?? b.forward
+        this.swivelSmoother.push(angleDeg(f.forward, fwd0), dtS)
+        this.yawSmoother.push(f.view.yawDeg, dtS)
+        // lateral metrics switch with hysteresis on the smoothed yaw (no flicker at the limit)
+        const sy = this.yawSmoother.value ?? f.view.yawDeg
+        this.lateralOn = this.lateralOn ? sy < LAT_MAX_YAW + LAT_GATE_HYST : sy < LAT_MAX_YAW - LAT_GATE_HYST
+        if (f.headYaw !== null) this.headYawSmoother.push(f.headYaw, dtS)
+        raw = computeDeviations(f, b, {
+          ppmSmoothed: this.scaleSmoother.value,
+          swivelDeg: this.swivelSmoother.value,
+          yawDeg: this.yawSmoother.value,
+          lateralOk: this.lateralOn,
+          headYawDeg: f.headYaw !== null ? this.headYawSmoother.value : null
+        }).subs
       }
+      // a rejected scale is a tracking glitch: the whole frame is discarded
     }
-
-    const D =
-      this.baseline !== null && this.scaleSmoother.value !== null
-        ? this.scaleSmoother.value / this.baseline.U0
-        : null
-
     if (frameUsable) {
-      const sinkGated = D === null || D < SINK_D_MIN || D > SINK_D_MAX
-      for (const key of METRIC_KEYS) {
-        // sink is held (not smoothed) outside the distance gate — geometry is
-        // ambiguous there and the EMA must not ingest it
-        if (key === 'sink' && sinkGated) continue
+      for (const key of ALL_SUBS) {
         const v = raw[key]
-        if (v !== undefined) this.smoothers.get(key)!.push(v, dtS)
+        if (v !== undefined && Number.isFinite(v)) {
+          this.smoothers.get(key)!.push(v, dtS)
+          this.freshAt.set(key, tMs)
+        }
       }
     }
 
-    // recalibration hint: view drifted far outside the calibrated distance
+    const D = b !== null && this.scaleSmoother.value !== null ? this.scaleSmoother.value / b.ppm : null
     if (active && D !== null) {
       if (D < RECAL_D_MIN || D > RECAL_D_MAX) {
         this.recalOutMs += dtMs
@@ -190,145 +384,125 @@ export class PostureEngine {
         this.recalOutMs = 0
       }
     }
-    // once the hint has fired and the view is still far off, all detectors are
-    // suspended — alerts against a bogus baseline are worse than silence
+    // once the hint has fired and the view is still far off, all detectors pause
     const driftSuspended = this.recalSuggested && D !== null && (D < RECAL_D_MIN || D > RECAL_D_MAX)
 
     const alerts: PostureAlert[] = []
     const issues = {} as Record<IssueId, IssueSnapshot>
-    const leanSigned = this.smoothers.get('leanSigned')!.value
-    const direction: 'left' | 'right' | undefined =
-      leanSigned === null ? undefined : leanSigned > 0 ? 'left' : 'right'
-
     for (const issue of ISSUES) {
       const cfg = this.settings.issues[issue]
-      const evalr = this.evaluateIssue(issue, cfg, raw, frameUsable, D)
-      const dataAvailable =
-        evalr.available && active && this.baseline !== null && cfg.enabled && !driftSuspended
+      const ev = this.evaluateIssue(issue, cfg, frameUsable, tMs)
+      this.avail[issue] = ev.available
+      const dataAvailable = ev.available && active && b !== null && cfg.enabled && !driftSuspended
 
-      // face-only pitch tracking is slow-mode: looking down briefly is normal
-      if (issue === 'headForward' && dataAvailable && evalr.pitchOnly !== this.pitchOnly) {
-        this.pitchOnly = evalr.pitchOnly
+      if (issue === 'headForward' && dataAvailable && ev.pitchOnly !== this.pitchOnly) {
+        this.pitchOnly = ev.pitchOnly
         this.machines.headForward.updateConfig(this.machineCfg('headForward'))
       }
 
-      // while AWAY the machines are frozen entirely — the spec's data-loss
-      // reset applies only to visibility gaps while the user is present
+      const direction: 'left' | 'right' | undefined =
+        issue === 'lean' && ev.signed !== null && ev.signed !== 0 ? (ev.signed > 0 ? 'left' : 'right') : undefined
+
+      // while AWAY the machines are frozen entirely
       if (active) {
         const fired = this.machines[issue].step(
-          { sevTrigger: evalr.sevTrigger, sevRecovery: evalr.sevRecovery, dataAvailable },
+          { sevTrigger: ev.sevTrigger, sevRecovery: ev.sevRecovery, dataAvailable },
           tMs
         )
-        for (const a of fired) alerts.push(issue === 'lean' && direction ? { ...a, direction } : a)
+        for (const a of fired) alerts.push(direction ? { ...a, direction } : a)
       }
 
       issues[issue] = {
         issue,
-        stage: cfg.enabled ? evalr.displayStage : 0,
+        stage: cfg.enabled && !driftSuspended ? ev.displayStage : 0,
         activeForMs: cfg.enabled ? this.machines[issue].episodeActiveForMs(tMs) : null,
-        metric: evalr.metric,
-        ...(issue === 'lean' && direction ? { direction } : {})
+        metric: ev.metric,
+        ...(direction ? { direction } : {})
       }
     }
 
     const worstStage = Math.max(...ISSUES.map((i) => issues[i].stage)) as Stage
+    const snapshot: PostureSnapshot = {
+      presence: this.presence,
+      issues,
+      worstStage,
+      calibrated: b !== null,
+      recalibrationSuggested: this.recalSuggested,
+      ts: tMs
+    }
+    const readout = this.readout(f, active)
+    if (readout) snapshot.readout = readout
+    return { snapshot, alerts }
+  }
 
+  private readout(f: PostureFeatures | null, active: boolean): PostureReadout | null {
+    if (!this.baseline || !active || !f) return null
+    const v = (k: SubMetricId): number | null => {
+      const fresh = this.freshAt.get(k)
+      return fresh !== undefined && (this.lastT ?? 0) - fresh <= SUB_STALE_S * 1000 ? this.smoothers.get(k)!.value : null
+    }
     return {
-      snapshot: {
-        presence: this.presence,
-        issues,
-        worstStage,
-        calibrated: this.baseline !== null,
-        recalibrationSuggested: this.recalSuggested,
-        ts: tMs
-      },
-      alerts
+      view: f.view.kind,
+      neckFwd: v('neck'),
+      trunkFwd: v('trunkFwd'),
+      drop: v('drop'),
+      forward: v('forward'),
+      lateral: v('trunkLat') ?? v('neckLat')
     }
   }
 
-  private evaluateIssue(
-    issue: IssueId,
-    cfg: EngineIssueSettings,
-    raw: RawMetrics,
-    frameUsable: boolean,
-    D: number | null
-  ): {
-    sevTrigger: Stage
-    sevRecovery: Stage
-    displayStage: Stage
-    available: boolean
-    metric: number
-    pitchOnly: boolean
-  } {
-    const none = { sevTrigger: 0 as Stage, sevRecovery: 0 as Stage, displayStage: 0 as Stage, available: false, metric: 0, pitchOnly: false }
+  private evaluateIssue(issue: IssueId, cfg: EngineIssueSettings, frameUsable: boolean, tMs: number): IssueEval {
+    const none: IssueEval = {
+      sevTrigger: 0,
+      sevRecovery: 0,
+      displayStage: 0,
+      available: false,
+      metric: 0,
+      signed: null,
+      pitchOnly: false
+    }
     if (!cfg.enabled || this.baseline === null) return none
     const sigma = cfg.sensitivity
     const en = cfg.notifyStages
-
-    if (issue === 'sink') {
-      const value = this.smoothers.get('sink')!.value
-      const inDistanceGate = D !== null && D >= SINK_D_MIN && D <= SINK_D_MAX
-      const available = frameUsable && raw.sink !== undefined && inDistanceGate
-      if (value === null) return none
-      return {
-        sevTrigger: stageWithin(value, THRESHOLDS.sink, sigma, 'linear', 'trigger', en),
-        sevRecovery: stageWithin(value, THRESHOLDS.sink, sigma, 'linear', 'recovery', en),
-        displayStage: inDistanceGate
-          ? stageWithin(value, THRESHOLDS.sink, sigma, 'linear', 'trigger', ALL_STAGES)
-          : 0,
-        available,
-        metric: value,
-        pitchOnly: false
-      }
-    }
-
-    if (issue === 'tooClose') {
-      const available = frameUsable && D !== null
-      if (D === null) return none
-      return {
-        sevTrigger: stageWithin(D, THRESHOLDS.close, sigma, 'ratio', 'trigger', en),
-        sevRecovery: stageWithin(D, THRESHOLDS.close, sigma, 'ratio', 'recovery', en),
-        displayStage: stageWithin(D, THRESHOLDS.close, sigma, 'ratio', 'trigger', ALL_STAGES),
-        available,
-        metric: D,
-        pitchOnly: false
-      }
-    }
-
-    // multi-sub-metric issues: severity is the max across available subs
-    const subs = issue === 'headForward' ? HEAD_FWD_SUBS : LEAN_SUBS
     let sevTrigger: Stage = 0
     let sevRecovery: Stage = 0
     let displayStage: Stage = 0
     let metric = 0
-    let anyRawPresent = false
-    for (const sub of subs) {
-      const value = this.smoothers.get(sub.key)!.value
-      if (raw[sub.key] !== undefined) anyRawPresent = true
-      if (value === null) continue
-      const t = stageWithin(value, sub.bases, sigma, sub.kind, 'trigger', en)
-      const r = stageWithin(value, sub.bases, sigma, sub.kind, 'recovery', en)
-      const d = stageWithin(value, sub.bases, sigma, sub.kind, 'trigger', ALL_STAGES)
+    let signed: number | null = null
+    let bestRatio = -Infinity
+    let anyFresh = false
+    // lean direction: consensus of the signed sub-metrics, each in units of its own
+    // stage-1 threshold, so one noisy sub-metric cannot flip the side on its own
+    let signedSum = 0
+    const disp: Partial<Record<SubMetricId, Stage>> = {}
+    for (const sub of SUB_METRICS[issue] as readonly SubMetricId[]) {
+      // a sub-metric that is unavailable this frame holds its smoothed value (§6),
+      // but only briefly: a long-stale value must not keep an episode alive on its own
+      const fresh = this.freshAt.get(sub)
+      if (fresh === undefined || tMs - fresh > SUB_STALE_S * 1000) continue
+      const sv = this.smoothers.get(sub)!.value
+      if (sv === null) continue
+      anyFresh = true
+      const value = SIGNED.has(sub) ? Math.abs(sv) : sv
+      const b = bases(issue, sub)
+      const t = stageWithin(value, b, sigma, 'trigger', en)
+      const r = stageWithin(value, b, sigma, 'recovery', en)
+      const d = stageWithin(value, b, sigma, 'trigger', ALL_STAGES)
+      disp[sub] = d
       if (t > sevTrigger) sevTrigger = t
       if (r > sevRecovery) sevRecovery = r
-      if (d > displayStage) {
-        displayStage = d
-        metric = value
+      const ratio = value / effThreshold(b[0], sigma, 'linear')
+      if (SIGNED.has(sub)) signedSum += sv / effThreshold(b[0], sigma, 'linear')
+      if (d > displayStage || (d === displayStage && ratio > bestRatio)) {
+        displayStage = Math.max(displayStage, d) as Stage
+        bestRatio = ratio
+        metric = sv
       }
     }
+    if (issue === 'lean' && anyFresh) signed = signedSum
     const pitchOnly =
-      issue === 'headForward' &&
-      raw.fwdPitch !== undefined &&
-      raw.fwdGap === undefined &&
-      raw.fwdFace === undefined
-    return {
-      sevTrigger,
-      sevRecovery,
-      displayStage,
-      available: frameUsable && anyRawPresent,
-      metric,
-      pitchOnly
-    }
+      issue === 'headForward' && (disp.pitch ?? 0) >= 1 && (disp.neck ?? 0) === 0 && (disp.neckDrop ?? 0) === 0
+    return { sevTrigger, sevRecovery, displayStage, available: frameUsable && anyFresh, metric, signed, pitchOnly }
   }
 
   private machineCfg(issue: IssueId): EpisodeConfig {
@@ -352,32 +526,35 @@ export class PostureEngine {
           this.goodMs = 0
         }
       }
-    } else {
-      if (goodFrame) {
-        this.goodMs += dtMs
-        if (this.goodMs >= AWAY_EXIT_S * 1000) {
-          const awayDurMs = tMs - (this.awayStartT ?? tMs)
-          this.presence = 'active'
-          this.badMs = 0
-          this.awayStartT = null
-          // fresh eyes after any absence: reseed all smoothing state
-          this.resetTransientState(false)
-          if (awayDurMs > AWAY_FULL_RESET_S * 1000) {
-            // the break itself fixed the posture — a fresh episode must earn a fresh dwell
-            for (const issue of ISSUES) this.machines[issue].reset(true)
-          }
-        }
-      } else {
-        this.goodMs = 0
+    } else if (goodFrame) {
+      this.goodMs += dtMs
+      if (this.goodMs >= AWAY_EXIT_S * 1000) {
+        const awayDurMs = tMs - (this.awayStartT ?? tMs)
+        this.presence = 'active'
+        this.badMs = 0
+        this.awayStartT = null
+        // fresh eyes after any absence: reseed all smoothing state
+        this.resetTransientState(false)
+        // the break itself fixed the posture — a fresh episode must earn a fresh dwell
+        if (awayDurMs > AWAY_FULL_RESET_S * 1000) for (const issue of ISSUES) this.machines[issue].reset(true)
       }
+    } else {
+      this.goodMs = 0
     }
   }
 
   private resetTransientState(fullEpisodeReset: boolean): void {
     for (const s of this.smoothers.values()) s.reseed()
     this.scaleSmoother.reseed()
+    this.swivelSmoother.reseed()
+    this.yawSmoother.reseed()
+    this.lateralOn = true
+    this.headYawSmoother.reseed()
+    this.freshAt.clear()
     this.gate.reset()
     this.recalOutMs = 0
+    this.pitchOnly = false
+    for (const issue of ISSUES) this.machines[issue].updateConfig(this.machineCfg(issue))
     if (fullEpisodeReset) {
       this.recalSuggested = false
       for (const issue of ISSUES) this.machines[issue].reset(true)

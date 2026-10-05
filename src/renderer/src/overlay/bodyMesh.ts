@@ -104,12 +104,41 @@ const JITTER = 0.26
 const MAX_EDGE = 3.5
 const EDGE_MID_MIN = 0.12
 
+/*
+ * Body proportions that let one measurement stand in for another when the
+ * camera angle hides it. Side-on, the left/right lines (shoulder to shoulder,
+ * ear to ear) collapse to a few noisy pixels, while the torso axis and the
+ * nose-to-ear distance keep their length.
+ */
+/** shoulder width per ear-to-shoulder distance */
+const SH_PER_NECK = 1.6
+/** shoulder width per shoulder-to-hip distance */
+const SH_PER_TORSO = 0.75
+/** head width per nose-to-ear distance (side-on the nose sits ~3/4 of a head width in front of the ear) */
+const HEAD_PER_NOSE_EAR = 1.4
+/** head width per shoulder width, when nothing on the head gives a size */
+const HEAD_PER_SHOULDER = 0.45
+/** body frame scale per head width, when the shoulders are out of view */
+const BODY_PER_HEAD = 2.4
+/**
+ * A left/right line's length relative to what the proportions predict: below
+ * FRONTAL_LO it is ignored (side view), above FRONTAL_HI it alone sets the
+ * frame (front view), with a smooth hand-over in between.
+ */
+const FRONTAL_LO = 0.45
+const FRONTAL_HI = 0.9
+/** a face from FaceLandmarker must sit within this many face widths of the pose's nose / head */
+const FACE_MATCH = 0.75
+
+const LM_NOSE = 0
 const LM_EYE_L_OUT = 3
 const LM_EYE_R_OUT = 6
 const LM_EAR_L = 7
 const LM_EAR_R = 8
 const LM_SH_L = 11
 const LM_SH_R = 12
+const LM_HIP_L = 23
+const LM_HIP_R = 24
 const JOINTS = [11, 12, 13, 14, 15, 16, 23, 24]
 
 // ---------- small geometry ----------
@@ -139,11 +168,43 @@ function lmIso(lm: readonly Landmark[], i: number, aspect: number): P | null {
 const mid = (a: P, b: P): P => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
 const dist = (a: P, b: P): number => Math.hypot(a.x - b.x, a.y - b.y)
 
+/** Mean of the points that are present. */
+function meanOf(ps: readonly (P | null)[]): P | null {
+  let x = 0
+  let y = 0
+  let n = 0
+  for (const p of ps) {
+    if (!p) continue
+    x += p.x
+    y += p.y
+    n++
+  }
+  return n ? { x: x / n, y: y / n } : null
+}
+
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)))
+  return t * t * (3 - 2 * t)
+}
+
+/** The angle equivalent to `a` modulo 2 pi, in [-pi, pi]. */
+export function wrapTurn(a: number): number {
+  return a - 2 * Math.PI * Math.round(a / (2 * Math.PI))
+}
+
+/** The angle equivalent to `a` modulo pi (a line has no direction), in [-pi/2, pi/2]. */
+function wrapHalfTurn(a: number): number {
+  return a - Math.PI * Math.round(a / Math.PI)
+}
+
 /** Keeps angles upright: a person seen from behind must not flip the lattice. */
 function uprightAngle(a: number): number {
-  if (a > Math.PI / 2) return a - Math.PI
-  if (a < -Math.PI / 2) return a + Math.PI
-  return a
+  return wrapHalfTurn(a)
+}
+
+/** The frame angle whose +v axis (body "down") points along `d` in the image. */
+function angleOfDown(d: P): number {
+  return Math.atan2(-d.x, d.y)
 }
 
 function frameFromLine(from: P, to: P, scaleMul: number, origin: P): Anchor {
@@ -274,31 +335,169 @@ export function sampleMask(grid: MaskGrid, aspect: number, x: number, y: number)
 
 // ---------- anchors ----------
 
-/** Body frame from the shoulders, falling back to the ears or eyes. */
+/** Where the head is, for the torso axis: between the ears, else the nose, else the eyes. */
+function headPoint(lm: readonly Landmark[], aspect: number): P | null {
+  return (
+    meanOf([lmIso(lm, LM_EAR_L, aspect), lmIso(lm, LM_EAR_R, aspect)]) ??
+    lmIso(lm, LM_NOSE, aspect) ??
+    meanOf([lmIso(lm, LM_EYE_L_OUT, aspect), lmIso(lm, LM_EYE_R_OUT, aspect)])
+  )
+}
+
+/**
+ * Body frame: origin on the shoulders, scale ~ shoulder width, +v down the
+ * torso. Seen from the front the shoulder line sets it; turning side-on that
+ * line shrinks to a few pixels whose direction is noise (and wraps through
+ * +-pi/2), so the frame hands over to the torso axis (shoulders to hips, or
+ * head to shoulders), which keeps its length and direction from any camera
+ * angle. With one shoulder hidden in a front view, the other is mirrored about
+ * the head's midline, so a shoulder flickering in and out of view does not
+ * swing the frame onto the head-to-shoulder diagonal. Falls back to a head
+ * frame when no shoulder is in view.
+ */
 export function bodyAnchor(lm: readonly Landmark[], aspect: number): Anchor | null {
   const ls = lmIso(lm, LM_SH_L, aspect)
   const rs = lmIso(lm, LM_SH_R, aspect)
-  if (ls && rs && dist(ls, rs) > 1e-3) return frameFromLine(rs, ls, 1, mid(rs, ls))
-  const le = lmIso(lm, LM_EAR_L, aspect)
-  const re = lmIso(lm, LM_EAR_R, aspect)
-  if (le && re && dist(le, re) > 1e-3) return frameFromLine(re, le, 2.4, mid(re, le))
-  const lo = lmIso(lm, LM_EYE_L_OUT, aspect)
-  const ro = lmIso(lm, LM_EYE_R_OUT, aspect)
-  if (lo && ro && dist(lo, ro) > 1e-3) return frameFromLine(ro, lo, 4, mid(ro, lo))
+  const hips = meanOf([lmIso(lm, LM_HIP_L, aspect), lmIso(lm, LM_HIP_R, aspect)])
+  const head = headPoint(lm, aspect)
+  if (ls && rs) {
+    const a = torsoFrame(ls, rs, hips, head)
+    if (a) return a
+  } else if (ls || rs) {
+    const one = (ls ?? rs) as P
+    const side = torsoFrame(one, null, hips, head)
+    const hf = headFrameW(lm, aspect, null)
+    if (hf && hf.wf > 0) {
+      // front view: the hidden shoulder sits opposite the visible one, across
+      // the vertical through the head
+      const twin = { x: 2 * hf.frame.x - one.x, y: one.y }
+      const front = ls ? torsoFrame(ls, twin, hips, head) : torsoFrame(twin, one, hips, head)
+      if (front && side) return blendAnchor(side, front, hf.wf)
+      if (front) return front
+    }
+    if (side) return side
+  }
+  const hf = headFrame(lm, aspect, null)
+  return hf ? { ...hf, scale: hf.scale * BODY_PER_HEAD } : null
+}
+
+/** Body frame from the left and (optional) right shoulder, oriented by the hips or head. */
+function torsoFrame(ls: P, rs: P | null, hips: P | null, head: P | null): Anchor | null {
+  const s = rs ? mid(ls, rs) : ls
+  const sw = rs ? dist(ls, rs) : 0
+  let axis: P | null = null
+  let axisWidth = 0
+  if (hips && dist(hips, s) > 1e-3) {
+    axis = { x: hips.x - s.x, y: hips.y - s.y }
+    axisWidth = dist(hips, s) * SH_PER_TORSO
+  } else if (head && dist(head, s) > 1e-3) {
+    axis = { x: s.x - head.x, y: s.y - head.y }
+    axisWidth = dist(head, s) * SH_PER_NECK
+  }
+  if (axis) {
+    const len = Math.hypot(axis.x, axis.y)
+    const dA = { x: axis.x / len, y: axis.y / len }
+    if (!rs || sw <= 1e-3) return { x: s.x, y: s.y, angle: angleOfDown(dA), scale: axisWidth }
+    // "down" across the shoulder line, oriented by the torso so that a person
+    // seen from behind (left and right swapped) stays upright
+    let dS = { x: -(ls.y - rs.y) / sw, y: (ls.x - rs.x) / sw }
+    if (dS.x * dA.x + dS.y * dA.y < 0) dS = { x: -dS.x, y: -dS.y }
+    const w = smoothstep(FRONTAL_LO, FRONTAL_HI, sw / axisWidth)
+    // two unit vectors at most 90 degrees apart: the blend never cancels out
+    const d = { x: w * dS.x + (1 - w) * dA.x, y: w * dS.y + (1 - w) * dA.y }
+    return { x: s.x, y: s.y, angle: angleOfDown(d), scale: w * sw + (1 - w) * axisWidth }
+  }
+  if (rs && sw > 1e-3) return frameFromLine(rs, ls, 1, s)
   return null
 }
 
-/** Head frame (scale = ear-to-ear width), centered a little above the ear line. */
-export function headAnchor(lm: readonly Landmark[], aspect: number): Anchor | null {
+/** `a` moved toward `b` by `t`, turning the short way round. */
+function blendAnchor(a: Anchor, b: Anchor, t: number): Anchor {
+  return {
+    x: a.x + t * (b.x - a.x),
+    y: a.y + t * (b.y - a.y),
+    angle: a.angle + t * wrapTurn(b.angle - a.angle),
+    scale: a.scale + t * (b.scale - a.scale)
+  }
+}
+
+function headFrame(lm: readonly Landmark[], aspect: number, body: Anchor | null): Anchor | null {
+  return headFrameW(lm, aspect, body)?.frame ?? null
+}
+
+/**
+ * Head frame centered on the skull (scale = head width), with `wf`, how
+ * front-on the head is (0 = side view, 1 = front view). Front-on the ear (or
+ * outer-eye) line sets its angle and width; side-on that line collapses, so the
+ * width comes from the nose-to-ear distance, the angle from `body` (or image
+ * upright), and the center slides from between the ears toward the nose.
+ */
+function headFrameW(
+  lm: readonly Landmark[],
+  aspect: number,
+  body: Anchor | null
+): { frame: Anchor; wf: number } | null {
   const le = lmIso(lm, LM_EAR_L, aspect)
   const re = lmIso(lm, LM_EAR_R, aspect)
-  let frame: Anchor | null = null
-  if (le && re && dist(le, re) > 1e-3) frame = frameFromLine(re, le, 1, mid(re, le))
-  else {
+  const nose = lmIso(lm, LM_NOSE, aspect)
+  let pair: [P, P] | null = null
+  let pairW = 0
+  if (le && re && dist(le, re) > 1e-3) {
+    pair = [re, le]
+    pairW = dist(le, re)
+  } else {
     const lo = lmIso(lm, LM_EYE_L_OUT, aspect)
     const ro = lmIso(lm, LM_EYE_R_OUT, aspect)
-    if (lo && ro && dist(lo, ro) > 1e-3) frame = frameFromLine(ro, lo, 1.7, mid(ro, lo))
+    if (lo && ro && dist(lo, ro) > 1e-3) {
+      pair = [ro, lo]
+      pairW = dist(lo, ro) * 1.7
+    }
   }
+  let noseEar = 0
+  if (nose) for (const e of [le, re]) if (e) noseEar = Math.max(noseEar, dist(nose, e))
+  let size = Math.max(pairW, HEAD_PER_NOSE_EAR * noseEar)
+  if (size <= 1e-3 && nose && body) size = HEAD_PER_SHOULDER * body.scale
+  if (size <= 1e-3) return null
+
+  const ref = body ? body.angle : 0
+  const wf = pair ? smoothstep(FRONTAL_LO, FRONTAL_HI, pairW / size) : 0
+  // the line has no direction: take whichever is nearest the reference
+  const line = pair ? ref + wrapHalfTurn(Math.atan2(pair[1].y - pair[0].y, pair[1].x - pair[0].x) - ref) : ref
+  const angle = ref + wf * (line - ref)
+  // side-on the skull's center sits behind the nose, ~0.3 of the way from the ear
+  const towardNose = (e: P, k: number): P => (nose ? { x: e.x + k * (nose.x - e.x), y: e.y + k * (nose.y - e.y) } : e)
+  let c: P | null
+  if (le && re) {
+    c = towardNose(mid(le, re), (1 - wf) * 0.3)
+  } else if (le || re) {
+    // one ear: a side view, or a front view with the other ear behind hair or a
+    // headset. Front-on the eye pair gives the center across the face; the ear
+    // only gives its depth along the head axis
+    const ear = (le ?? re) as P
+    const side = towardNose(ear, 0.3)
+    if (pair) {
+      const pm = mid(pair[0], pair[1])
+      const dn = { x: -Math.sin(angle), y: Math.cos(angle) }
+      const depth = (ear.x - pm.x) * dn.x + (ear.y - pm.y) * dn.y
+      const front = { x: pm.x + depth * dn.x, y: pm.y + depth * dn.y }
+      c = { x: side.x + wf * (front.x - side.x), y: side.y + wf * (front.y - side.y) }
+    } else {
+      c = side
+    }
+  } else {
+    c = pair ? mid(pair[0], pair[1]) : nose
+  }
+  if (!c) return null
+  return { frame: { x: c.x, y: c.y, angle, scale: size }, wf }
+}
+
+/**
+ * Head frame (scale = head width), centered a little above the ear line.
+ * `body` (the raw body frame) steadies its angle side-on and gives it a size
+ * when only the nose is visible.
+ */
+export function headAnchor(lm: readonly Landmark[], aspect: number, body: Anchor | null = null): Anchor | null {
+  const frame = headFrame(lm, aspect, body)
   if (!frame) return null
   // image "up" in the head frame is -v
   const lift = 0.12 * frame.scale
@@ -433,23 +632,89 @@ function faceWidth(face: FaceInput): number {
 }
 
 /**
+ * Whether a face from FaceLandmarker belongs to the tracked person. It runs
+ * on its own: when the user turns away or half leaves the frame it happily
+ * returns someone else's face (a coworker behind them, a poster on the wall).
+ * The face must sit on the person's mask and next to the pose's own nose (or
+ * head frame when the nose is hidden).
+ */
+export function faceOnPerson(
+  face: FaceInput,
+  grid: MaskGrid,
+  aspect: number,
+  lm: readonly Landmark[],
+  head: Anchor | null
+): boolean {
+  const oval = face.topology.oval
+  if (oval.length < 3) return false
+  let cx = 0
+  let cy = 0
+  let x0 = Infinity
+  let x1 = -Infinity
+  let y0 = Infinity
+  let y1 = -Infinity
+  for (const i of oval) {
+    const p = face.points[i]
+    if (!p) return false
+    const x = p.x * aspect
+    cx += x / oval.length
+    cy += p.y / oval.length
+    x0 = Math.min(x0, x)
+    x1 = Math.max(x1, x)
+    y0 = Math.min(y0, p.y)
+    y1 = Math.max(y1, p.y)
+  }
+  if (sampleMask(grid, aspect, cx, cy) < MASK_T) return false
+  const ref = lmIso(lm, LM_NOSE, aspect) ?? head
+  if (!ref) return true // nothing on the pose to compare with; the mask check has to do
+  const size = Math.max(x1 - x0, y1 - y0, head ? head.scale : 0)
+  return dist(ref, { x: cx, y: cy }) <= FACE_MATCH * size
+}
+
+/** lattice spacing multipliers outside this range make a smudge or a few stray triangles */
+const SPACING_MIN = 1
+const SPACING_MAX = 2.5
+
+function clampSpacing(k: number): number {
+  return Number.isFinite(k) ? Math.min(SPACING_MAX, Math.max(SPACING_MIN, k)) : SPACING_MIN
+}
+
+/**
+ * Lattice spacing the display asks for (see meshLook): a subtle overlay wants
+ * a sparser lattice, not just fainter lines. The overlay sets it and every
+ * BodyMeshBuilder reads it on its next frame, so the detection loop needs no
+ * knowledge of display settings.
+ */
+let displaySpacing = SPACING_MIN
+
+export function setMeshSpacing(k: number): void {
+  displaySpacing = clampSpacing(k)
+}
+
+export function meshSpacing(): number {
+  return displaySpacing
+}
+
+/**
  * One frame's mesh. `anchors` should already be smoothed (see
  * BodyMeshBuilder) — the lattice rides on them, so their jitter would be the
- * mesh's jitter.
+ * mesh's jitter. `spacing` (>= 1) widens the lattice; 1 is the densest.
  */
 export function buildBodyMesh(
   grid: MaskGrid,
   lm: readonly Landmark[],
   aspect: number,
   anchors: Anchors,
-  face: FaceInput | null = null
+  face: FaceInput | null = null,
+  spacing = 1
 ): BodyMesh | null {
   const { body, head } = anchors
   const bounds = localBounds(grid, aspect, body)
   if (!bounds || body.scale <= 1e-4) return null
 
-  const bodyUnits = Math.max(BODY_STEP, MIN_BODY_STEP / body.scale)
-  const headUnits = head ? Math.max(HEAD_STEP, MIN_HEAD_STEP / head.scale) : bodyUnits
+  const spread = clampSpacing(spacing)
+  const bodyUnits = Math.max(BODY_STEP * spread, MIN_BODY_STEP / body.scale)
+  const headUnits = head ? Math.max(HEAD_STEP * spread, MIN_HEAD_STEP / head.scale) : bodyUnits
   const bodyStep = bodyUnits * body.scale
   const headStep = head ? headUnits * head.scale : bodyStep
   const headR = head ? HEAD_R * head.scale : 0
@@ -469,9 +734,13 @@ export function buildBodyMesh(
   }
 
   // 1. face oval first: the canonical face mesh owns everything inside it, and
-  //    the body mesh stitches onto its rim
+  //    the body mesh stitches onto its rim (only a face that is this person's)
   const topo =
-    face && face.points.length >= face.topology.size && face.topology.oval.length >= 3 && faceWidth(face) >= MIN_FACE_WIDTH / aspect
+    face &&
+    face.points.length >= face.topology.size &&
+    face.topology.oval.length >= 3 &&
+    faceWidth(face) >= MIN_FACE_WIDTH / aspect &&
+    faceOnPerson(face, grid, aspect, lm, head)
       ? face.topology
       : null
   const faceVertex = topo ? new Int32Array(topo.size).fill(-1) : null
@@ -639,15 +908,16 @@ export function buildBodyMesh(
     if (p && p.y <= 1 && sampleMask(grid, aspect, p.x, p.y) >= 0.3) joints.push(toBody(p.x, p.y))
   }
 
-  const ls = lmIso(lm, LM_SH_L, aspect)
-  const rs = lmIso(lm, LM_SH_R, aspect)
-  const shMid = ls && rs ? mid(ls, rs) : null
-  const shW = ls && rs ? dist(ls, rs) : body.scale
+  // sized from the frames' scales, which hold up from any camera angle (the raw
+  // shoulder or ear spread collapses to a few pixels side-on); a single visible
+  // shoulder is enough to place the neck and shoulders
+  const shoulder = meanOf([lmIso(lm, LM_SH_L, aspect), lmIso(lm, LM_SH_R, aspect)])
+  const shW = body.scale
   const region = (p: P, r: number): Region => ({ ...toBody(p.x, p.y), r: r / body.scale })
   const regions: BodyMesh['regions'] = {
     head: head ? region(head, headR) : null,
-    neck: head && shMid ? region(mid(head, shMid), 0.38 * shW) : null,
-    shoulders: shMid ? region(shMid, 0.62 * shW) : null
+    neck: head && shoulder ? region(mid(head, shoulder), 0.38 * shW) : null,
+    shoulders: shoulder ? region(shoulder, 0.62 * shW) : null
   }
 
   return {
@@ -681,6 +951,16 @@ class OneEuro {
     this.dx = 0
   }
 
+  /** the current filtered value (null before the first sample) */
+  get value(): number | null {
+    return this.x
+  }
+
+  /** Moves the state by `d` without disturbing its velocity. */
+  shift(d: number): void {
+    if (this.x !== null) this.x += d
+  }
+
   filter(value: number, tS: number): number {
     if (this.x === null) {
       this.x = value
@@ -707,10 +987,23 @@ class AnchorFilter {
   }
 
   filter(a: Anchor, tS: number): Anchor {
+    // A frame's angle comes from a direction-less line, so a raw angle and the
+    // same one +-pi describe the same frame. Unwrap against the filtered angle
+    // instead of letting a wrap (near +-pi/2) drag the filter across the circle.
+    const prev = this.fa.value
+    const raw = prev === null ? a.angle : prev + wrapHalfTurn(a.angle - prev)
+    let angle = this.fa.filter(raw, tS)
+    // ...and once the filtered frame has drifted well past vertical, take the
+    // equivalent upright one again
+    if (Math.abs(angle) > Math.PI / 2 + 0.35) {
+      const d = -Math.PI * Math.sign(angle)
+      this.fa.shift(d)
+      angle += d
+    }
     return {
       x: this.fx.filter(a.x, tS),
       y: this.fy.filter(a.y, tS),
-      angle: this.fa.filter(a.angle, tS),
+      angle,
       scale: this.fs.filter(a.scale, tS)
     }
   }
@@ -786,16 +1079,73 @@ export class BodyMeshBuilder {
     }
     this.grid = downsampleMask(mask, mw, mh, this.grid)
     const tS = tMs / 1000
-    const rawHead = headAnchor(lm, aspect)
+    const rawHead = headAnchor(lm, aspect, rawBody)
     if (!rawHead && this.hadHead) this.head.reset()
     this.hadHead = !!rawHead
-    if (!face) this.face = null
+    // someone else's face must not be stitched in, nor blended into this one's smoothing
+    const own = face && faceOnPerson(face, this.grid, aspect, lm, rawHead) ? face : null
+    if (!own) this.face = null
     return buildBodyMesh(
       this.grid,
       lm,
       aspect,
       { body: this.body.filter(rawBody, tS), head: rawHead ? this.head.filter(rawHead, tS) : null },
-      face ? { points: this.smoothFace(face.points), topology: face.topology } : null
+      own ? { points: this.smoothFace(own.points), topology: own.topology } : null,
+      displaySpacing
     )
   }
+}
+
+// ---------- display helpers (MeshOverlay) ----------
+
+export type RegionKey = keyof BodyMesh['regions']
+
+/** past these, easing the display frame would visibly drag the mesh off the body */
+const SNAP_MOVE = 0.5 // in body scales
+const SNAP_TURN = 0.3 // rad
+const SNAP_ZOOM = 1.3 // ratio
+
+/**
+ * One render frame's step of the display body frame toward the latest
+ * detection's (`k` = easing fraction for this frame). Every mesh vertex is
+ * stored relative to that frame, so a big step in any of position, angle or
+ * scale snaps instead of easing; small ones ease, the angle along the short
+ * way round.
+ */
+export function easeAnchor(display: Anchor | null, target: Anchor, k: number): Anchor {
+  if (!display) return { ...target }
+  const turn = wrapTurn(target.angle - display.angle)
+  const zoom = target.scale / Math.max(1e-9, display.scale)
+  if (
+    Math.hypot(target.x - display.x, target.y - display.y) > SNAP_MOVE * target.scale ||
+    Math.abs(turn) > SNAP_TURN ||
+    zoom > SNAP_ZOOM ||
+    zoom < 1 / SNAP_ZOOM
+  ) {
+    return { ...target }
+  }
+  return {
+    x: display.x + (target.x - display.x) * k,
+    y: display.y + (target.y - display.y) * k,
+    angle: display.angle + turn * k,
+    scale: display.scale + (target.scale - display.scale) * k
+  }
+}
+
+/**
+ * The worst stage per mesh region, for issues that map onto the same region
+ * (head-forward and too-close both light the head): each region is painted
+ * once, in its most severe color. Stage-0 issues are left out.
+ */
+export function worstPerRegion<I extends string>(
+  stages: Iterable<readonly [I, number]>,
+  regionOf: Readonly<Record<I, RegionKey>>
+): [RegionKey, number][] {
+  const worst = new Map<RegionKey, number>()
+  for (const [issue, stage] of stages) {
+    if (stage <= 0) continue
+    const key = regionOf[issue]
+    worst.set(key, Math.max(stage, worst.get(key) ?? 0))
+  }
+  return [...worst]
 }

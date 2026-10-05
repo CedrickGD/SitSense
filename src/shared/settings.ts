@@ -1,4 +1,5 @@
-import type { CalibrationBaseline, IssueId } from './posture'
+import { DEFAULT_AI_SETTINGS, mergeAiSettings, type AiSettings } from './ai'
+import { isCurrentBaseline, type CalibrationBaseline, type IssueId } from './posture'
 
 export interface IssueSettings {
   enabled: boolean
@@ -22,15 +23,21 @@ export interface NotificationSettings {
   dwellSeconds: number
   /** quiet period between nudges for the same issue, minutes (1–10) */
   cooldownMinutes: number
-  /** a worsening stage notifies immediately, even during the quiet period */
+  /** a worse stage that holds for ESC_DWELL notifies even during the quiet period (≥ ESC_MIN_GAP apart) */
   escalation: boolean
   sound: boolean
 }
 
-/** How the live preview draws what the pose model sees. */
-export type OverlayStyle = 'mesh' | 'hologram' | 'skeleton' | 'off'
+/**
+ * How the live preview draws what the pose model sees. 'skeleton' is the
+ * "Lines" view: the ear–shoulder–hip alignment the AI measures (the default).
+ */
+export type OverlayStyle = 'skeleton' | 'mesh' | 'hologram' | 'off'
 
-export const OVERLAY_STYLES: readonly OverlayStyle[] = ['mesh', 'hologram', 'skeleton', 'off']
+export const OVERLAY_STYLES: readonly OverlayStyle[] = ['skeleton', 'mesh', 'hologram', 'off']
+
+/** Bumped when a settings migration must run once over older files. */
+export const SETTINGS_VERSION = 2
 
 /** Fixed overlay hues; 'posture' follows the stage colors, 'custom' uses customColor. */
 export const OVERLAY_PRESETS = {
@@ -51,6 +58,27 @@ export interface OverlaySettings {
   color: OverlayColor
   /** #rrggbb, used when color === 'custom' */
   customColor: string
+  /** mesh/hologram fill strength 0.15–1 (lower = more of the person shows through) */
+  meshIntensity: number
+}
+
+export const MESH_INTENSITY_RANGE = { min: 0.15, max: 1, default: 0.4 } as const
+
+export interface BreakSettings {
+  /** remind to stand up after a continuous sitting stretch */
+  enabled: boolean
+  /** sitting minutes before the reminder (20–120) */
+  intervalMinutes: number
+}
+
+export const BREAK_INTERVAL_RANGE = { min: 20, max: 120, default: 50 } as const
+
+export interface UpdateSettings {
+  /**
+   * Ask GitHub for a newer version 30 s after start and every 6 h (src/main/updater.ts).
+   * Off = no automatic network request at all; "Check for updates" still works.
+   */
+  autoCheck: boolean
 }
 
 export interface GeneralSettings {
@@ -70,9 +98,15 @@ export interface Settings {
   notifications: NotificationSettings
   general: GeneralSettings
   overlay: OverlaySettings
+  breaks: BreakSettings
+  /** app updates from GitHub Releases */
+  updates: UpdateSettings
   calibration: CalibrationBaseline | null
+  /** connected AI models (docs/specs/ai-providers.md) */
+  ai: AiSettings
   /** user has seen the close-to-tray coach mark */
   onboarded: boolean
+  settingsVersion: number
 }
 
 const defaultIssue = (): IssueSettings => ({
@@ -105,13 +139,31 @@ export const DEFAULT_SETTINGS: Settings = {
     hidePreview: false
   },
   overlay: {
-    style: 'mesh',
+    style: 'skeleton',
     color: 'posture',
-    customColor: '#44d7f0'
+    customColor: '#44d7f0',
+    meshIntensity: MESH_INTENSITY_RANGE.default
+  },
+  breaks: {
+    enabled: true,
+    intervalMinutes: BREAK_INTERVAL_RANGE.default
+  },
+  updates: {
+    autoCheck: true
   },
   calibration: null,
-  onboarded: false
+  ai: DEFAULT_AI_SETTINGS,
+  onboarded: false,
+  settingsVersion: SETTINGS_VERSION
 }
+
+/** a finite number clamped into range; anything else falls back to the default */
+function clampNum(v: unknown, r: { min: number; max: number; default: number }): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return r.default
+  return Math.min(r.max, Math.max(r.min, v))
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
 
 /** Deep-merge a possibly stale/partial persisted object over the defaults. */
 export function mergeSettings(persisted: unknown): Settings {
@@ -125,8 +177,20 @@ export function mergeSettings(persisted: unknown): Settings {
     notifications: { ...base.notifications, ...(p.notifications ?? {}) },
     general: { ...base.general, ...(p.general ?? {}) },
     overlay: { ...base.overlay, ...(p.overlay ?? {}) },
-    calibration: p.calibration ?? null
+    breaks: { ...base.breaks, ...(p.breaks && typeof p.breaks === 'object' && !Array.isArray(p.breaks) ? p.breaks : {}) },
+    updates: {
+      autoCheck: isPlainObject(p.updates) && typeof p.updates['autoCheck'] === 'boolean' ? p.updates['autoCheck'] : base.updates.autoCheck
+    },
+    // v1 (frontal-camera) baselines are meaningless to the v2 engine — re-run setup
+    calibration: isCurrentBaseline(p.calibration) ? p.calibration : null,
+    ai: mergeAiSettings(p.ai),
+    onboarded: p.onboarded === true,
+    settingsVersion: SETTINGS_VERSION
   }
+  const fromVersion = typeof p.settingsVersion === 'number' ? p.settingsVersion : 1
+  // v1 shipped the full-body mesh as the default preview; v2's default is the
+  // calmer alignment-lines view. Files from v1 still carry the old default.
+  if (fromVersion < 2 && out.overlay.style === 'mesh') out.overlay.style = 'skeleton'
   for (const id of Object.keys(base.issues) as IssueId[]) {
     out.issues[id] = { ...base.issues[id], ...(p.issues?.[id] ?? {}) }
     const ns = out.issues[id].notifyStages
@@ -146,5 +210,8 @@ export function mergeSettings(persisted: unknown): Settings {
   if (typeof out.overlay.customColor !== 'string' || !/^#[0-9a-f]{6}$/i.test(out.overlay.customColor)) {
     out.overlay.customColor = base.overlay.customColor
   }
+  out.overlay.meshIntensity = clampNum(out.overlay.meshIntensity, MESH_INTENSITY_RANGE)
+  if (typeof out.breaks.enabled !== 'boolean') out.breaks.enabled = base.breaks.enabled
+  out.breaks.intervalMinutes = Math.round(clampNum(out.breaks.intervalMinutes, BREAK_INTERVAL_RANGE))
   return out
 }

@@ -1,25 +1,132 @@
 import type { FaceLandmarker, PoseLandmarker, PoseLandmarkerResult } from '@mediapipe/tasks-vision'
-import type { DetectionStatus, PostureSnapshot } from '@shared/posture'
+import { aiErrorMessage, type AiPostureReview, type AiReviewRequest } from '@shared/ai'
+import { ISSUES, type CalibrationBaseline, type DetectionStatus, type PostureSnapshot } from '@shared/posture'
 import { PRESET_FPS, type Settings } from '@shared/settings'
+import {
+  aiAvailable,
+  aiReviewsSetup,
+  measurementsFromBaseline,
+  measurementsFromFeatures,
+  primaryAiConnection
+} from '@renderer/ai/helpers'
+import { makeSketch, makeSnapshot } from '@renderer/ai/review-image'
 import { BodyMeshBuilder, type BodyMesh, type FaceInput } from '@renderer/overlay/bodyMesh'
-import { CalibrationSession, assessPlacement } from '@renderer/posture/calibration'
-import { CAL_COUNTDOWN_S } from '@renderer/posture/constants'
-import { PostureEngine, type EngineSettings } from '@renderer/posture/engine'
-import type { Frame } from '@renderer/posture/types'
-import { useAppStore } from '@renderer/state/store'
+import { assessPosture } from '@renderer/posture/assess'
+import { SetupSession, medianFeatures, type SetupPhase, type SetupState } from '@renderer/posture/calibration'
+import { PostureEngine, baselineNeckLatRef, type EngineSettings } from '@renderer/posture/engine'
+import type { Frame, PoseFrame, PostureFeatures } from '@renderer/posture/types'
+import {
+  IDLE_AI_CHECK,
+  IDLE_SETUP,
+  useAppStore,
+  type AiCheckState,
+  type CameraUiState,
+  type DetectorError,
+  type DetectorErrorReason,
+  type SetupUiState
+} from '@renderer/state/store'
 import { CameraOpenError, listCameras, openCamera, stopStream } from './camera'
 import { FrameLoop } from './frame-loop'
-import { createFaceLandmarker, createLandmarker, faceMeshTopology, recreateAsCpu } from './landmarker'
+import { createFaceLandmarker, createLandmarker, faceMeshTopology, recreateAsCpu, webglAvailable } from './landmarker'
+import { overlayGuide, segmentStages } from './pose-geometry'
+import {
+  IDLE_PROBE,
+  NO_EXTRAS,
+  SetupProbe,
+  publishProbe,
+  reviewFailNote,
+  setupReviewMeasurements,
+  summarizeBaseline,
+  toSetupUi,
+  unverifiedPhrase,
+  type SetupExtras
+} from './setup-ui'
 
 const SNAPSHOT_MIN_INTERVAL_MS = 1000
+/** the store's snapshot is refreshed at least this often while the window is visible (durations tick) */
+const UI_SNAPSHOT_INTERVAL_MS = 1000
+/** the Lines overlay data is published at most this often (≤ 15 Hz) */
+const POSE_MIN_INTERVAL_MS = 1000 / 15 - 4
 const FPS_WINDOW_MS = 2000
 const RETRY_BASE_MS = 2000
 const RETRY_MAX_MS = 30000
+/** model failures retry slowly (they no longer touch the camera, but cost CPU) */
+const MODEL_RETRY_BASE_MS = 10000
+const MODEL_RETRY_MAX_MS = 5 * 60000
+/** a camera that opens but never delivers a frame (IR cam, shutter, half-dead driver) */
+const FIRST_FRAME_TIMEOUT_MS = 8000
+/** a muted track (Chromium: no frames arriving) for this long = stalled camera */
+const MUTE_RESTART_MS = 5000
+/** while another camera stands in for the preferred one, look for it this often */
+const FALLBACK_RECHECK_MS = 15000
+/** persistent inference failure: this many in a row, or no success for this long */
+const INFER_FAIL_MAX = 10
+const INFER_FAIL_MS = 3000
+/** a rebuild this long after the previous one counts as a fresh incident */
+const REBUILD_FORGET_MS = 60000
+/** a failed setup capture is shown this long before setup restarts by itself */
+const SETUP_FAIL_SHOW_MS = 2500
+/** Ask AI needs a GOOD frame at most this old; the measurements use this much history */
+const RECENT_MS = 1500
+
+const NOT_PAUSED_MSG = 'Monitoring is paused — resume it to ask.'
+const NO_AI_MSG = 'Turn on a connected AI model in Settings → AI models first.'
+const NOT_IN_VIEW_MSG = "SitSense can't see you right now — sit in view and try again."
+
+class ModelLoadError extends Error {
+  readonly reason: DetectorErrorReason
+  constructor(cause: unknown, reason: DetectorErrorReason = null) {
+    super('posture model failed to load')
+    this.cause = cause
+    this.reason = reason
+  }
+}
+
+/** Waits until the element has a decoded frame; false on timeout or when its source is removed. */
+function waitForFirstFrame(video: HTMLVideoElement, timeoutMs: number): Promise<boolean> {
+  if (video.readyState >= 2) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (ok: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      video.removeEventListener('loadeddata', onData)
+      video.removeEventListener('playing', onData)
+      video.removeEventListener('emptied', onEmptied)
+      resolve(ok)
+    }
+    const onData = (): void => {
+      if (video.readyState >= 2) done(true)
+    }
+    const onEmptied = (): void => done(false)
+    const timer = setTimeout(() => done(video.readyState >= 2), timeoutMs)
+    video.addEventListener('loadeddata', onData)
+    video.addEventListener('playing', onData)
+    video.addEventListener('emptied', onEmptied)
+    video.play().catch(() => undefined)
+  })
+}
+
+interface RecentGood {
+  t: number
+  frame: PoseFrame
+  f: PostureFeatures
+}
 
 /**
- * Owns the camera stream, the MediaPipe landmarker, the frame loop, and the
- * posture engine; bridges their results into the zustand store and main-process
- * IPC. Pausing releases the camera completely (webcam LED off — trust signal).
+ * Owns the camera stream, the MediaPipe landmarker, the frame loop, the posture engine
+ * and the setup session; bridges their results into the zustand store (contract:
+ * state/store.ts) and main-process IPC. Pausing releases the camera completely (webcam
+ * LED off — trust signal).
+ *
+ * Public API (for the UI):
+ * - init(), getStream(), acquireMesh()
+ * - start(), restart(), stopCapture(), retryCamera()
+ * - startSetup() (step 1: camera check), beginSetupCoaching() (step 2), cancelSetup(),
+ *   forceSetup(), restartSetup(), skipSetupReview()
+ * - askAi(), dismissAiCheck()
+ * - keepBaselineForThisCamera()
  */
 class DetectionController {
   private video: HTMLVideoElement | null = null
@@ -48,19 +155,65 @@ class DetectionController {
   private faceGen = 0
   /** how long the last frame took, all models included */
   private frameCostMs = 0
-  /** whether this calibration capture can afford the face model (decided once per capture) */
-  private faceDuringCapture = true
 
-  private session: CalibrationSession | null = null
-  private countdownTimer: ReturnType<typeof setInterval> | null = null
-
+  // ---- camera / start lifecycle ----
   private starting = false
   private pendingRestart = false
   private wantRunning = false
-  private firstInferenceOk = false
+  /** bumped by every camera release: an in-flight start() notices and bails out */
+  private captureGen = 0
+  /** bumped whenever the landmarker is replaced or discarded */
+  private modelGen = 0
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private retryDelay = RETRY_BASE_MS
+  private modelRetryDelay = MODEL_RETRY_BASE_MS
+  private muteTimer: ReturnType<typeof setTimeout> | null = null
+  private fallbackTimer: ReturnType<typeof setInterval> | null = null
+  private activeDeviceId: string | null = null
+  private usingFallback = false
 
+  // ---- inference health ----
+  private firstInferenceOk = false
+  private inferFailures = 0
+  private lastInferOkAt = 0
+  private rebuilds = 0
+  private lastRebuildAt = 0
+
+  // ---- baseline ----
+  /** JSON (without cameraDeviceId) of the baseline currently applied to the engine */
+  private appliedBaselineKey = 'null'
+
+  // ---- setup ----
+  /** the wizard is open and wants a setup session (survives pauses) */
+  private setupWanted = false
+  /**
+   * 'camera' = setup step 1: only the camera check runs (SetupProbe → useSetupProbe), no
+   * session, so nothing can be captured before the user starts coaching; 'coach' = step 2+.
+   */
+  private setupStage: 'camera' | 'coach' = 'camera'
+  private probe = new SetupProbe()
+  private session: SetupSession | null = null
+  private sessionDeviceId: string | null = null
+  private lastSetupPhase: SetupPhase | null = null
+  private lastSetupState: SetupState | null = null
+  private setupExtras: SetupExtras = NO_EXTRAS
+  private setupUiKey = ''
+  /** last GOOD frame pushed to the setup session (for the review sketch) */
+  private lastSetupGood: { frame: PoseFrame; f: PostureFeatures } | null = null
+  private reviewToken = 0
+  private failTimer: ReturnType<typeof setTimeout> | null = null
+  /** whether this setup can afford the cosmetic face model (decided once per session) */
+  private faceDuringSetup = true
+
+  // ---- Ask AI ----
+  private recent: RecentGood[] = []
+  private aiToken = 0
+
+  // ---- publishing ----
+  private latestSnapshot: PostureSnapshot | null = null
+  private lastUiSnapshotKey = ''
+  private lastUiSnapshotAt = 0
+  private lastPoseAt = 0
   private lastSnapshotSentAt = 0
   private lastSnapshotKey = ''
   private frameCount = 0
@@ -75,17 +228,11 @@ class DetectionController {
 
   async init(): Promise<void> {
     // listen before asking: the window may be shown while the status request is in flight
-    window.sitsense.onWindowVisibility((visible) => {
-      this.visibilityKnown = true
-      this.windowVisible = visible
-      useAppStore.setState({ windowVisible: visible })
-    })
-    const [settings, appStatus] = await Promise.all([
-      window.sitsense.getSettings(),
-      window.sitsense.getAppStatus()
-    ])
+    window.sitsense.onWindowVisibility((visible) => this.onVisibility(visible))
+    const [settings, appStatus] = await Promise.all([window.sitsense.getSettings(), window.sitsense.getAppStatus()])
     this.settings = settings
-    this.engine = new PostureEngine(settings.calibration, toEngineSettings(settings))
+    this.engine = new PostureEngine(null, toEngineSettings(settings))
+    this.syncBaseline()
     if (!this.visibilityKnown) this.windowVisible = appStatus.windowVisible
     useAppStore.setState({
       settings,
@@ -105,23 +252,27 @@ class DetectionController {
     window.sitsense.onPauseChanged((pause) => {
       useAppStore.setState({ pause })
       if (pause.paused) {
-        // a mid-capture pause would silently starve the calibration session
-        if (this.session) this.cancelCalibration()
+        // the camera goes off: setup is suspended (it restarts on resume while the wizard
+        // is open), Ask AI is cancelled, and a camera/model error the user can't act on
+        // while paused is cleared (resume re-probes)
+        this.suspendSetup()
+        this.cancelAiCheck()
         this.stopCapture()
+        this.setDetectorError(null)
+        this.updateStatus({ cameraError: null })
       } else {
+        this.retryDelay = RETRY_BASE_MS
         void this.start()
       }
     })
     window.sitsense.onNavigate((route) => useAppStore.getState().setRoute(route))
     window.sitsense.onRequestCalibration(() => useAppStore.getState().setRoute('calibrate'))
     window.sitsense.onSystemResumed(() => {
-      // camera streams often die silently across sleep/resume
-      if (this.wantRunning) void this.restart()
+      // camera streams and GPU contexts often die silently across sleep/resume:
+      // rebuild the model and reopen the camera
+      if (this.wantRunning) this.discardModels('system resumed', false)
     })
-    navigator.mediaDevices.addEventListener('devicechange', () => {
-      void this.refreshCameraList()
-      if (this.status.cameraError && this.wantRunning) void this.restart()
-    })
+    navigator.mediaDevices.addEventListener('devicechange', () => void this.onDeviceChange())
 
     if (!appStatus.pause.paused) await this.start()
   }
@@ -150,71 +301,105 @@ class DetectionController {
     return this.stream
   }
 
+  // ───────────────────────────── camera lifecycle ─────────────────────────────
+
   async start(): Promise<void> {
     this.wantRunning = true
     if (this.starting || !this.settings || !this.video) return
     this.starting = true
     this.clearRetry()
+    // re-entry (retry / redundant resume): drop any existing loop and stream first
+    this.releaseCamera()
+    const gen = this.captureGen
+    const video = this.video
+    let opened: MediaStream | null = null
+    /** stopCapture() ran during an await (pause, restart): this call is stale */
+    const stale = (): boolean => gen !== this.captureGen || !this.wantRunning
+    const bail = (): void => {
+      if (opened && this.stream !== opened) stopStream(opened)
+      // paused and resumed mid-start: open again once this call unwinds
+      if (this.wantRunning) this.pendingRestart = true
+    }
     try {
-      // re-entry (retry / redundant resume): drop any existing loop and stream
-      // first so nothing stacks or leaks
-      this.loop?.stop()
-      this.loop = null
-      stopStream(this.stream)
-      this.stream = null
-
-      const stream = await openCamera(this.settings.cameraDeviceId)
-      if (!this.wantRunning) {
-        // paused while the camera was opening — release it immediately
-        stopStream(stream)
-        return
-      }
-      this.stream = stream
-      const track = stream.getVideoTracks()[0]
-      if (track) track.onended = () => this.scheduleRetry()
-      this.video.srcObject = stream
-      await this.video.play().catch(() => undefined)
-      await this.refreshCameraList()
-
+      // 1. the model first — a broken model must never switch the webcam on
       if (!this.landmarker) {
-        const pref =
-          this.settings.delegate === 'auto' && this.settings.resolvedDelegate
-            ? this.settings.resolvedDelegate
-            : this.settings.delegate
-        const created = await createLandmarker(pref)
-        this.landmarker = created.landmarker
-        this.delegate = created.delegate
-        this.masksOn = false
-        this.firstInferenceOk = false
-        if (this.settings.resolvedDelegate !== created.delegate) {
-          void window.sitsense.setSettings({ resolvedDelegate: created.delegate })
+        const settings = this.settings
+        const pref = settings.delegate === 'auto' && settings.resolvedDelegate ? settings.resolvedDelegate : settings.delegate
+        const mGen = this.modelGen
+        let created: Awaited<ReturnType<typeof createLandmarker>>
+        if (!webglAvailable()) throw new ModelLoadError(new Error('no WebGL'), 'no-webgl')
+        try {
+          created = await createLandmarker(pref)
+        } catch (err) {
+          throw new ModelLoadError(err)
         }
+        if (mGen !== this.modelGen || this.landmarker) {
+          created.landmarker.close() // delegate changed while loading
+        } else {
+          this.landmarker = created.landmarker
+          this.delegate = created.delegate
+          this.masksOn = false
+          this.firstInferenceOk = false
+          this.inferFailures = 0
+          // pin 'auto' only to what was actually probed: a GPU that worked, or one that failed
+          const probed = created.delegate === 'GPU' || created.gpuFailed
+          if (probed && settings.delegate === 'auto' && settings.resolvedDelegate !== created.delegate) {
+            void window.sitsense.setSettings({ resolvedDelegate: created.delegate })
+          }
+        }
+        if (stale()) return bail()
       }
 
-      if (!this.wantRunning) {
-        stopStream(this.stream)
-        this.stream = null
-        this.video.srcObject = null
-        return
-      }
-      const fps = PRESET_FPS[this.settings.performancePreset]
-      this.loop = new FrameLoop(this.video, fps, () => this.processFrame())
+      // 2. the camera
+      const cam = await openCamera(this.settings.cameraDeviceId)
+      opened = cam.stream
+      if (stale()) return bail()
+      this.stream = cam.stream
+      this.activeDeviceId = cam.deviceId
+      this.usingFallback = cam.fellBack
+      this.setCameraUi({ activeDeviceId: cam.deviceId, activeLabel: cam.label || null, usingFallback: cam.fellBack })
+      this.watchTrack(cam.stream)
+      video.srcObject = cam.stream
+
+      // 3. the first frame, bounded: a camera that never sends one must not wedge start()
+      const gotFrame = await waitForFirstFrame(video, FIRST_FRAME_TIMEOUT_MS)
+      if (stale()) return bail()
+      if (!gotFrame) throw new CameraOpenError('in-use')
+      void this.refreshCameraList()
+
+      // 4. the loop
+      const fps = this.targetFps()
+      this.loop = new FrameLoop(video, fps, () => this.processFrame(), { onStall: () => this.onLoopStall() })
       this.loop.start()
       this.retryDelay = RETRY_BASE_MS
+      this.modelRetryDelay = MODEL_RETRY_BASE_MS
       this.fpsWindowStart = performance.now()
       this.frameCount = 0
+      this.lastInferOkAt = performance.now()
+      this.setDetectorError(null)
       this.updateStatus({ running: true, delegate: this.delegate, targetFps: fps, cameraError: null })
+      this.syncBaseline()
+      if (cam.fellBack) this.startFallbackRecheck()
+      this.onCaptureStarted()
     } catch (err) {
-      stopStream(this.stream)
-      this.stream = null
-      if (err instanceof CameraOpenError) {
-        this.updateStatus({ running: false, cameraError: err.kind })
-      } else {
-        // landmarker/asset failure — not the camera's fault, don't mislabel it
-        console.error('[detection] start failed:', err)
-        this.updateStatus({ running: false })
+      if (gen !== this.captureGen) {
+        // released meanwhile: not our resources, not our error to show
+        if (opened && this.stream !== opened) stopStream(opened)
+        if (this.wantRunning) this.pendingRestart = true
+        return
       }
-      this.scheduleRetry()
+      this.releaseCamera()
+      if (opened) stopStream(opened)
+      if (err instanceof CameraOpenError) {
+        this.updateStatus({ running: false, cameraError: this.wantRunning ? err.kind : null })
+        this.scheduleRetry('camera')
+      } else {
+        // model / asset failure — not the camera's fault, don't mislabel it
+        console.error('[detection] start failed:', err)
+        if (this.wantRunning) this.setDetectorError('model', err instanceof ModelLoadError ? err.reason : null)
+        this.updateStatus({ running: false, cameraError: null })
+        this.scheduleRetry('model')
+      }
     } finally {
       this.starting = false
       if (this.pendingRestart) {
@@ -224,18 +409,11 @@ class DetectionController {
     }
   }
 
-  /** Releases everything camera-related; the landmarker survives for restarts. */
+  /** Releases everything camera-related and stops monitoring; the landmarker survives for restarts. */
   stopCapture(): void {
     this.wantRunning = false
     this.clearRetry()
-    this.loop?.stop()
-    this.loop = null
-    stopStream(this.stream)
-    this.stream = null
-    if (this.video) this.video.srcObject = null
-    this.meshBuilder.reset()
-    this.releaseFace()
-    useAppStore.setState({ overlay: null, mesh: null })
+    this.releaseCamera()
     this.updateStatus({ running: false, measuredFps: 0 })
   }
 
@@ -249,75 +427,494 @@ class DetectionController {
     if (want) await this.start()
   }
 
-  // ---------- calibration wizard driving ----------
-
-  startPlacementCheck(): void {
-    useAppStore.setState((s) => ({
-      calibration: { ...s.calibration, phase: 'positioning', failReason: null, progress: 0 }
-    }))
+  /**
+   * For camera/model error panels ("Try again", "Scan for cameras"): always does
+   * something visible — resumes monitoring when paused, else re-probes right away.
+   */
+  retryCamera(): void {
+    if (useAppStore.getState().pause.paused) {
+      void window.sitsense.setPause(false)
+      return
+    }
+    this.retryDelay = RETRY_BASE_MS
+    this.modelRetryDelay = MODEL_RETRY_BASE_MS
+    this.wantRunning = true
+    void this.restart()
   }
 
-  beginCountdown(): void {
-    this.cancelCountdown()
-    let value = CAL_COUNTDOWN_S
-    useAppStore.setState((s) => ({ calibration: { ...s.calibration, phase: 'countdown', countdownValue: value } }))
-    this.countdownTimer = setInterval(() => {
-      value -= 1
-      if (value <= 0) {
-        this.cancelCountdown()
-        this.beginCapture()
-      } else {
-        useAppStore.setState((s) => ({ calibration: { ...s.calibration, countdownValue: value } }))
-      }
-    }, 1000)
+  /** Stop the loop and the stream (wantRunning untouched). Any in-flight start() goes stale. */
+  private releaseCamera(): void {
+    this.captureGen++
+    this.clearMuteTimer()
+    this.stopFallbackRecheck()
+    this.loop?.stop()
+    this.loop = null
+    stopStream(this.stream)
+    this.stream = null
+    if (this.video) this.video.srcObject = null
+    this.meshBuilder.reset()
+    this.releaseFace()
+    this.recent = []
+    const s = useAppStore.getState()
+    if (s.pose || s.mesh) useAppStore.setState({ pose: null, mesh: null })
   }
 
-  beginCapture(): void {
-    this.session = new CalibrationSession(performance.now())
-    // the 5s capture needs ≥ ~45 samples for a solid median — temporarily lift
-    // the frame rate above the power-saving preset (restored on finish/cancel)
-    const captureFps = Math.max(PRESET_FPS.balanced, this.currentFps())
-    this.loop?.setFps(captureFps)
-    // a machine that can't fit the cosmetic face mesh into the capture frame
-    // rate drops it for these few seconds rather than starve the baseline
-    this.faceDuringCapture = this.frameCostMs < 0.6 * (1000 / captureFps)
-    useAppStore.setState((s) => ({ calibration: { ...s.calibration, phase: 'capturing', progress: 0 } }))
+  private watchTrack(stream: MediaStream): void {
+    const track = stream.getVideoTracks()[0]
+    if (!track) return
+    track.onended = () => {
+      // unplugged / taken away: release it and reopen with backoff
+      if (this.stream !== stream || !this.wantRunning) return
+      console.warn('[detection] camera track ended')
+      this.releaseCamera()
+      this.updateStatus({ running: false, measuredFps: 0 })
+      this.scheduleRetry('camera')
+    }
+    // Chromium mutes a video track whose source stops delivering frames
+    track.onmute = () => {
+      this.clearMuteTimer()
+      this.muteTimer = setTimeout(() => {
+        this.muteTimer = null
+        if (this.stream === stream && track.muted && this.wantRunning) {
+          console.warn('[detection] camera stopped sending frames — reopening it')
+          void this.restart()
+        }
+      }, MUTE_RESTART_MS)
+    }
+    track.onunmute = () => this.clearMuteTimer()
   }
 
-  cancelCalibration(): void {
-    this.cancelCountdown()
-    this.session = null
-    this.loop?.setFps(this.currentFps())
-    useAppStore.setState((s) => ({
-      calibration: { ...s.calibration, phase: 'idle', progress: 0, banner: null }
-    }))
+  private clearMuteTimer(): void {
+    if (this.muteTimer) clearTimeout(this.muteTimer)
+    this.muteTimer = null
   }
 
-  private currentFps(): number {
-    return PRESET_FPS[this.settings?.performancePreset ?? 'balanced']
+  /** The frame loop saw no new frame for a while (only trusted while the window is visible). */
+  private onLoopStall(): void {
+    if (!this.wantRunning || !this.windowVisible) return
+    console.warn('[detection] no new camera frames — reopening the camera')
+    void this.restart()
   }
 
-  private cancelCountdown(): void {
-    if (this.countdownTimer) clearInterval(this.countdownTimer)
-    this.countdownTimer = null
+  private async onDeviceChange(): Promise<void> {
+    const cams = await this.refreshCameraList()
+    if (!this.wantRunning) return
+    if (this.status.cameraError) {
+      void this.restart()
+      return
+    }
+    if (this.usingFallback && cams && this.preferredPresent(cams)) void this.restart()
   }
 
-  private finishCalibration(): void {
+  private preferredPresent(cams: { deviceId: string }[]): boolean {
+    const preferred = this.settings?.cameraDeviceId
+    return !!preferred && cams.some((c) => c.deviceId === preferred)
+  }
+
+  /** While another camera stands in, look for the preferred one (enumeration only — no LED). */
+  private startFallbackRecheck(): void {
+    this.stopFallbackRecheck()
+    this.fallbackTimer = setInterval(() => {
+      if (!this.wantRunning || !this.usingFallback) return this.stopFallbackRecheck()
+      void this.refreshCameraList().then((cams) => {
+        if (cams && this.usingFallback && this.wantRunning && this.preferredPresent(cams)) void this.restart()
+      })
+    }, FALLBACK_RECHECK_MS)
+  }
+
+  private stopFallbackRecheck(): void {
+    if (this.fallbackTimer) clearInterval(this.fallbackTimer)
+    this.fallbackTimer = null
+  }
+
+  // ───────────────────────────── posture setup ─────────────────────────────
+
+  /**
+   * The setup flow opened (or "Redo setup"): step 1, the camera check. No session runs yet
+   * — the probe reports what the camera can see (useSetupProbe) until beginSetupCoaching().
+   */
+  startSetup(): void {
+    this.setupWanted = true
+    this.setupStage = 'camera'
+    this.dropSession()
+    this.probe.reset()
+    publishProbe(IDLE_PROBE)
+    this.setSetupUi(useAppStore.getState().pause.paused ? { ...IDLE_SETUP, suspended: 'paused' } : IDLE_SETUP)
+  }
+
+  /** Setup step 2 ("Start coaching"): start a fresh AI-coached setup session. */
+  beginSetupCoaching(): void {
+    if (!this.setupWanted) return
+    this.setupStage = 'coach'
+    this.newSession()
+  }
+
+  /** The setup screen closed: discard the session, nothing saved (unless it was already done). */
+  cancelSetup(): void {
+    this.setupWanted = false
+    this.setupStage = 'camera'
+    this.dropSession()
+    this.probe.reset()
+    publishProbe(IDLE_PROBE)
+    this.setSetupUi(IDLE_SETUP)
+  }
+
+  /** "Save this posture anyway" (only while setup.canForce). */
+  forceSetup(): void {
     if (!this.session) return
-    const result = this.session.finish(Date.now(), this.settings?.cameraDeviceId ?? null)
+    if (this.lastSetupPhase === 'reviewing') this.reviewToken++ // ignore the pending review
+    if (this.session.force()) this.afterSetupStep(this.session.state)
+  }
+
+  /** "Start over" while coaching: back to searching (a done or missing session starts fresh). */
+  restartSetup(): void {
+    if (!this.setupWanted || this.setupStage !== 'coach') return
+    if (!this.session || this.lastSetupPhase === 'done') {
+      this.newSession()
+      return
+    }
+    this.reviewToken++
+    this.clearFailTimer()
+    this.setupExtras = { ...NO_EXTRAS }
+    this.session.restart()
+    this.afterSetupStep(this.session.state)
+  }
+
+  /**
+   * Don't wait for the cloud reviewer. A capture the on-device judge verified is saved on
+   * its verdict; one it could not verify is NOT saved — coaching continues (ui-v3.md §7.5).
+   */
+  skipSetupReview(): void {
+    if (!this.session || this.lastSetupPhase !== 'reviewing') return
+    this.reviewToken++
+    const unverified = this.lastSetupState?.unverifiedChecks ?? []
+    const note =
+      unverified.length > 0
+        ? `Skipped the second opinion — I still can't check ${unverifiedPhrase(unverified)} from this angle.`
+        : 'Skipped the second opinion — saved on the on-device check.'
+    this.setupExtras = { ...this.setupExtras, reviewing: null, reviewNote: note }
+    this.session.skipReview()
+    this.afterSetupStep(this.session.state)
+  }
+
+  private setupRunning(): boolean {
+    return this.session !== null && this.lastSetupPhase !== 'done'
+  }
+
+  private newSession(): void {
+    this.dropSession()
+    if (useAppStore.getState().pause.paused) {
+      this.setSetupUi({ ...IDLE_SETUP, suspended: 'paused' })
+      return
+    }
+    this.session = new SetupSession({
+      review: aiReviewsSetup(this.settings),
+      cameraDeviceId: this.activeDeviceId
+    })
+    this.sessionDeviceId = this.activeDeviceId
+    this.setupExtras = { ...NO_EXTRAS }
+    // a machine that can't fit the cosmetic face mesh into the setup frame rate
+    // drops it for the setup rather than starve the baseline
+    this.faceDuringSetup = this.frameCostMs < 0.6 * (1000 / Math.max(PRESET_FPS.balanced, this.presetFps()))
+    this.afterSetupStep(this.session.state)
+  }
+
+  private dropSession(): void {
+    this.reviewToken++
+    this.clearFailTimer()
     this.session = null
-    this.loop?.setFps(this.currentFps())
-    if (result.ok) {
-      void useAppStore.getState().patchSettings({ calibration: result.baseline })
-      useAppStore.setState((s) => ({ calibration: { ...s.calibration, phase: 'done', banner: null } }))
-    } else {
-      useAppStore.setState((s) => ({
-        calibration: { ...s.calibration, phase: 'failed', failReason: result.reason, banner: null }
-      }))
+    this.lastSetupPhase = null
+    this.lastSetupState = null
+    this.lastSetupGood = null
+    this.setupUiKey = ''
+    this.applyLoopFps()
+  }
+
+  /** Pause: the camera goes off, so the session can't continue; it restarts on resume. */
+  private suspendSetup(): void {
+    if (!this.setupWanted) return
+    const done = this.lastSetupPhase === 'done'
+    if (done) return // keep the Done screen
+    this.dropSession()
+    this.probe.reset()
+    publishProbe(IDLE_PROBE)
+    this.setSetupUi({ ...IDLE_SETUP, suspended: 'paused' })
+  }
+
+  /** The camera (re)started. */
+  private onCaptureStarted(): void {
+    if (!this.setupWanted) return
+    if (this.setupStage === 'camera') {
+      this.probe.reset()
+      this.setSetupUi(IDLE_SETUP)
+      return
+    }
+    if (!this.session) {
+      this.newSession()
+      return
+    }
+    const phase = this.lastSetupPhase
+    if (phase === 'done') return
+    if (this.sessionDeviceId !== this.activeDeviceId) {
+      // a different camera: the gravity estimate and the view are different too
+      this.newSession()
+      return
+    }
+    // frames from before the gap must not merge with frames after it
+    if (phase === 'holding' || phase === 'capturing') {
+      this.session.restart()
+      this.afterSetupStep(this.session.state)
     }
   }
 
-  // ---------- per-frame ----------
+  private pushSetup(frame: Frame, t: number): void {
+    if (!this.session) return
+    const st = this.session.push(frame, t)
+    if (frame && st.features) this.lastSetupGood = { frame, f: st.features }
+    this.afterSetupStep(st)
+  }
+
+  /** Reacts to phase changes (review, failure, done) and publishes the setup UI state. */
+  private afterSetupStep(st: SetupState): void {
+    this.lastSetupState = st
+    if (st.phase !== this.lastSetupPhase) {
+      const prev = this.lastSetupPhase
+      this.lastSetupPhase = st.phase
+      if (prev === 'reviewing') this.setupExtras = { ...this.setupExtras, reviewing: null }
+      if (st.phase === 'reviewing') this.beginReview(st)
+      if (st.phase === 'failed') this.scheduleSetupRecover()
+      if (st.phase === 'done') this.saveBaseline(st)
+      if (st.phase === 'searching' || st.phase === 'coaching') this.setupExtras = { ...this.setupExtras, saveError: null }
+      this.applyLoopFps()
+    }
+    this.publishSetup(st)
+  }
+
+  private publishSetup(st: SetupState): void {
+    this.setSetupUi(toSetupUi(st, this.setupExtras))
+  }
+
+  private setSetupUi(ui: SetupUiState): void {
+    const key = JSON.stringify(ui)
+    if (key === this.setupUiKey) return
+    this.setupUiKey = key
+    useAppStore.setState({ setup: ui })
+  }
+
+  private republishSetup(): void {
+    if (this.session) this.publishSetup(this.lastSetupState ?? this.session.state)
+  }
+
+  private scheduleSetupRecover(): void {
+    this.clearFailTimer()
+    const session = this.session
+    this.failTimer = setTimeout(() => {
+      this.failTimer = null
+      if (this.session !== session || !session || this.lastSetupPhase !== 'failed') return
+      session.restart()
+      this.afterSetupStep(session.state)
+    }, SETUP_FAIL_SHOW_MS)
+  }
+
+  private clearFailTimer(): void {
+    if (this.failTimer) clearTimeout(this.failTimer)
+    this.failTimer = null
+  }
+
+  /** Entered 'reviewing' (once per capture): ask the connected model to double-check. */
+  private beginReview(st: SetupState): void {
+    const session = this.session
+    const baseline = session?.pendingBaseline
+    if (!session || !baseline) return
+    const token = ++this.reviewToken
+    const settings = this.settings
+    const conn = primaryAiConnection(settings)
+    // decided async so the phase bookkeeping of this step completes first
+    const skip = (note: string): void => {
+      void Promise.resolve().then(() => {
+        if (token !== this.reviewToken || this.session !== session || this.lastSetupPhase !== 'reviewing') return
+        this.setupExtras = { ...this.setupExtras, reviewing: null, reviewNote: note }
+        session.skipReview()
+        this.afterSetupStep(session.state)
+      })
+    }
+    const fail = (message: string): string => reviewFailNote(conn?.label ?? null, message, st.unverifiedChecks)
+    if (!settings || !conn || !aiAvailable(settings)) return skip(fail('no AI model is turned on'))
+    if (useAppStore.getState().pause.paused) return skip(fail('monitoring is paused'))
+
+    let image: string
+    try {
+      if (settings.ai.share === 'snapshot') {
+        if (!this.video) throw new Error('No camera frame yet.')
+        image = makeSnapshot(this.video)
+      } else {
+        const good = this.lastSetupGood
+        if (!good) throw new Error('No pose to draw.')
+        image = makeSketch(good.frame, { up: baseline.up, anchor: st.features?.anchor ?? good.f.anchor })
+      }
+    } catch (err) {
+      return skip(fail(err instanceof Error ? err.message : 'could not prepare the image'))
+    }
+
+    this.setupExtras = { ...this.setupExtras, reviewing: { label: conn.label }, reviewNote: null }
+    const req: AiReviewRequest = {
+      purpose: 'setup',
+      imageJpegB64: image,
+      share: settings.ai.share,
+      // what the on-device judge couldn't verify goes to the model as "judge this" (§11.3)
+      measurements: setupReviewMeasurements(measurementsFromBaseline(baseline), st.unverifiedChecks)
+    }
+    window.sitsense
+      .aiReviewPosture(req)
+      .catch((err): AiPostureReview => ({ ok: false, message: aiErrorMessage(err) }))
+      .then((res) => this.onSetupReview(token, session, res))
+  }
+
+  private onSetupReview(token: number, session: SetupSession, res: AiPostureReview): void {
+    if (token !== this.reviewToken || this.session !== session || this.lastSetupPhase !== 'reviewing') return
+    if (res.ok) {
+      this.setupExtras = {
+        ...this.setupExtras,
+        reviewing: null,
+        reviewNote: null,
+        reviewResult: {
+          label: res.connectionLabel,
+          model: res.model,
+          verdict: res.verdict,
+          summary: res.summary,
+          instructions: [...res.instructions]
+        }
+      }
+      if (res.verdict === 'good') session.acceptReview()
+      else session.rejectReview(res.instructions[0] ?? res.summary)
+    } else {
+      const label = this.setupExtras.reviewing?.label ?? null
+      const unverified = this.lastSetupState?.unverifiedChecks ?? []
+      this.setupExtras = { ...this.setupExtras, reviewing: null, reviewNote: reviewFailNote(label, res.message, unverified) }
+      session.skipReview()
+    }
+    this.afterSetupStep(session.state)
+  }
+
+  /** 'done': persist the baseline, stamped with the camera actually in use. */
+  private saveBaseline(st: SetupState): void {
+    const b = st.baseline
+    if (!b) return
+    const baseline: CalibrationBaseline = {
+      ...b,
+      cameraDeviceId: this.activeDeviceId ?? b.cameraDeviceId,
+      // every key explicit: settings patches deep-merge, so a missing key would keep
+      // the previous baseline's value
+      neckLatRef: b.neckLatRef ?? baselineNeckLatRef(b)
+    }
+    this.setupExtras = { ...this.setupExtras, baselineSummary: summarizeBaseline(baseline, st.forced), saveError: null }
+    const session = this.session
+    useAppStore
+      .getState()
+      .patchSettings({ calibration: baseline })
+      .catch((err) => {
+        console.error('[detection] saving the baseline failed:', err)
+        if (this.session !== session) return
+        this.setupExtras = { ...this.setupExtras, saveError: "Couldn't save your posture — redo setup to try again." }
+        this.republishSetup()
+      })
+  }
+
+  // ───────────────────────────── baseline vs camera ─────────────────────────────
+
+  /**
+   * Apply the saved baseline unless it was captured with a different camera than the
+   * one in use (both ids known): a different camera is a different view, so comparing
+   * against it would raise false alerts. A baseline without an id (older setups) adopts
+   * the camera in use.
+   */
+  private syncBaseline(): void {
+    if (!this.engine) return
+    const b = this.settings?.calibration ?? null
+    const active = this.activeDeviceId
+    const mismatch = !!(b && b.cameraDeviceId && active && b.cameraDeviceId !== active)
+    const apply = mismatch ? null : b
+    const key = apply ? JSON.stringify({ ...apply, cameraDeviceId: null }) : 'null'
+    if (key !== this.appliedBaselineKey) {
+      this.appliedBaselineKey = key
+      this.engine.setBaseline(apply)
+    }
+    if (useAppStore.getState().baselineCameraMismatch !== mismatch) useAppStore.setState({ baselineCameraMismatch: mismatch })
+    if (b && !b.cameraDeviceId && active && !this.usingFallback && this.status.running) {
+      void window.sitsense.setSettings({ calibration: { cameraDeviceId: active } })
+    }
+  }
+
+  /** "Use it with this camera anyway": adopt the camera in use for the saved baseline. */
+  keepBaselineForThisCamera(): void {
+    const b = this.settings?.calibration
+    if (!b || !this.activeDeviceId) return
+    void useAppStore.getState().patchSettings({ calibration: { cameraDeviceId: this.activeDeviceId } })
+  }
+
+  // ───────────────────────────── Ask AI ─────────────────────────────
+
+  /** Dashboard "Ask AI": one on-demand review of the current posture → store.aiCheck. */
+  async askAi(): Promise<void> {
+    const settings = this.settings
+    const conn = primaryAiConnection(settings)
+    if (useAppStore.getState().aiCheck.status === 'pending') return
+    if (!settings || !conn || !aiAvailable(settings)) return this.setAiCheck({ ...IDLE_AI_CHECK, status: 'error', message: NO_AI_MSG })
+    if (useAppStore.getState().pause.paused) return this.setAiCheck({ ...IDLE_AI_CHECK, status: 'error', message: NOT_PAUSED_MSG })
+    const now = performance.now()
+    const recent = this.recent.filter((r) => now - r.t <= RECENT_MS)
+    const latest = recent[recent.length - 1]
+    if (!latest || !this.status.running) {
+      return this.setAiCheck({ ...IDLE_AI_CHECK, status: 'error', message: NOT_IN_VIEW_MSG })
+    }
+    const features = medianFeatures(recent.map((r) => r.f))
+    const assessment = assessPosture(features, features.upSource)
+    let image: string
+    try {
+      if (settings.ai.share === 'snapshot') {
+        if (!this.video) throw new Error('No camera frame yet.')
+        image = makeSnapshot(this.video)
+      } else {
+        image = makeSketch(latest.frame, latest.f)
+      }
+    } catch (err) {
+      return this.setAiCheck({
+        ...IDLE_AI_CHECK,
+        status: 'error',
+        message: `Couldn't prepare the image: ${err instanceof Error ? err.message : 'unknown error'}`
+      })
+    }
+    const token = ++this.aiToken
+    this.setAiCheck({ status: 'pending', label: conn.label, review: null, message: null })
+    const res = await window.sitsense
+      .aiReviewPosture({
+        purpose: 'check',
+        imageJpegB64: image,
+        share: settings.ai.share,
+        measurements: measurementsFromFeatures(features, assessment)
+      })
+      .catch((err): AiPostureReview => ({ ok: false, message: aiErrorMessage(err) }))
+    if (token !== this.aiToken) return // dismissed, paused or superseded meanwhile
+    if (res.ok) this.setAiCheck({ status: 'done', label: res.connectionLabel, review: res, message: null })
+    else this.setAiCheck({ status: 'error', label: conn.label, review: null, message: res.message })
+  }
+
+  /** Close the Ask AI card (also ignores a result still on its way). */
+  dismissAiCheck(): void {
+    this.aiToken++
+    this.setAiCheck(IDLE_AI_CHECK)
+  }
+
+  private cancelAiCheck(): void {
+    if (useAppStore.getState().aiCheck.status !== 'idle') this.dismissAiCheck()
+    else this.aiToken++
+  }
+
+  private setAiCheck(s: AiCheckState): void {
+    useAppStore.setState({ aiCheck: s })
+  }
+
+  // ───────────────────────────── per-frame ─────────────────────────────
 
   private async processFrame(): Promise<void> {
     if (!this.landmarker || !this.video || !this.engine) return
@@ -331,67 +928,142 @@ class DetectionController {
   }
 
   private async processDetections(t: number): Promise<void> {
-    if (!this.landmarker || !this.video || !this.engine) return
+    const landmarker = this.landmarker
+    const video = this.video
+    const engine = this.engine
+    if (!landmarker || !video || !engine) return
 
     let frame: Frame = null
     let mesh: BodyMesh | null = null
     let result: PoseLandmarkerResult | null = null
     try {
-      result = this.landmarker.detectForVideo(this.video, t)
-      frame = (result.landmarks?.[0] as Frame) ?? null
-      this.firstInferenceOk = true
+      result = landmarker.detectForVideo(video, t)
+      const image = result.landmarks?.[0]
+      if (image && image.length > 0) {
+        const vw = video.videoWidth
+        const vh = video.videoHeight
+        frame = { image, world: result.worldLandmarks?.[0] ?? null, aspect: vw > 0 && vh > 0 ? vw / vh : 4 / 3 }
+      }
+      this.onInferenceOk(t)
       if (this.masksOn) mesh = this.buildMesh(result, frame, t)
     } catch (err) {
-      if (!this.firstInferenceOk && this.delegate === 'GPU') {
-        // some GPU failures only surface at the first inference
-        console.warn('[detection] first GPU inference failed, recreating as CPU:', err)
-        this.landmarker = await recreateAsCpu(this.landmarker)
-        this.masksOn = false
-        this.delegate = 'CPU'
-        void window.sitsense.setSettings({ resolvedDelegate: 'CPU' })
-        this.updateStatus({ delegate: 'CPU' })
-        return
-      }
-      if (this.masksOn && !this.masksFailed) {
-        // the segmentation graph is the newest moving part — drop it before
-        // it can take posture detection down (syncMasks switches it off next frame)
-        console.warn('[detection] inference failed with segmentation on — disabling the mesh preview:', err)
-        this.masksFailed = true
-        useAppStore.setState({ meshUnavailable: true })
-        return
-      }
-      console.error('[detection] inference failed:', err)
+      await this.onInferenceError(err, t)
       return
     } finally {
       // masks are copies owned by us (no callback was passed) — free them every frame
       result?.close()
     }
+    if (landmarker !== this.landmarker) return // replaced while this frame ran
 
-    useAppStore.setState({ overlay: frame ? [...frame] : null, mesh })
     this.trackFps(t)
 
-    const cal = useAppStore.getState().calibration
-    if (cal.phase === 'positioning' || cal.phase === 'countdown' || cal.phase === 'capturing') {
-      const placement = assessPlacement(frame)
-      useAppStore.setState((s) => ({ calibration: { ...s.calibration, placement } }))
-      if (this.session && cal.phase === 'capturing') {
-        this.session.addFrame(frame, t)
-        const progress = this.session.progress(t)
-        useAppStore.setState((s) => ({
-          calibration: {
-            ...s.calibration,
-            progress,
-            banner: placement.verdict === 'unusable' ? 'hold' : null
-          }
-        }))
-        if (this.session.isComplete(t)) this.finishCalibration()
-      }
-    }
+    const setupLive = this.setupRunning()
+    if (setupLive) this.pushSetup(frame, t)
 
-    const { snapshot, alerts } = this.engine.processFrame(frame, t)
-    useAppStore.setState({ snapshot })
-    for (const alert of alerts) window.sitsense.sendAlert(alert)
+    const { snapshot, alerts } = engine.processFrame(frame, t)
+    // no nudges while the setup flow is open (camera check, coaching, Saved)
+    if (!setupLive && !this.setupWanted) for (const alert of alerts) window.sitsense.sendAlert(alert)
+    // setup step 1: report what the camera can see (no session runs yet)
+    if (this.setupWanted && this.setupStage === 'camera') publishProbe(this.probe.push(engine.lastFeatures, t))
     this.maybeSendSnapshot(snapshot, t)
+    this.publishSnapshot(snapshot, t)
+
+    const features = engine.lastFeatures
+    if (frame && features) {
+      this.recent.push({ t, frame, f: features })
+    }
+    while (this.recent.length > 0 && t - this.recent[0].t > RECENT_MS) this.recent.shift()
+
+    const overlayFeatures = setupLive ? (this.lastSetupState?.features ?? null) : features
+    this.publishPose(frame, overlayFeatures, snapshot, mesh, t)
+  }
+
+  private onInferenceOk(t: number): void {
+    this.firstInferenceOk = true
+    this.inferFailures = 0
+    this.lastInferOkAt = t
+    if (this.rebuilds > 0 && t - this.lastRebuildAt > REBUILD_FORGET_MS) this.rebuilds = 0
+    if (useAppStore.getState().detectorError === 'inference') this.setDetectorError(null)
+  }
+
+  private async onInferenceError(err: unknown, t: number): Promise<void> {
+    if (this.masksOn && !this.masksFailed) {
+      // the segmentation graph is the newest moving part: blame it first — even on the
+      // very first frame, so it can't get the GPU blamed (syncMasks turns it off next frame)
+      console.warn('[detection] inference failed with segmentation on — disabling the mesh preview:', err)
+      this.masksFailed = true
+      useAppStore.setState({ meshUnavailable: true })
+      return
+    }
+    if (!this.firstInferenceOk && this.delegate === 'GPU') {
+      // the pose graph itself failed its first inference on the GPU
+      console.warn('[detection] first GPU inference failed, recreating as CPU:', err)
+      const mGen = ++this.modelGen
+      let cpu: PoseLandmarker
+      try {
+        cpu = await recreateAsCpu(this.landmarker)
+      } catch (e) {
+        if (mGen === this.modelGen) {
+          this.landmarker = null
+          this.discardModels(`CPU fallback failed: ${String(e)}`, true)
+        }
+        return
+      }
+      if (mGen !== this.modelGen) {
+        cpu.close()
+        return
+      }
+      this.landmarker = cpu
+      this.masksOn = false
+      this.delegate = 'CPU'
+      this.inferFailures = 0
+      // a different delegate deserves a fresh chance at the preview extras
+      this.masksFailed = false
+      this.faceFailed = false
+      this.faceGpuBroken = false
+      useAppStore.setState({ meshUnavailable: false })
+      if (this.settings?.delegate === 'auto') void window.sitsense.setSettings({ resolvedDelegate: 'CPU' })
+      this.updateStatus({ delegate: 'CPU' })
+      return
+    }
+    this.inferFailures++
+    console.error('[detection] inference failed:', err)
+    if (this.inferFailures >= INFER_FAIL_MAX || t - this.lastInferOkAt > INFER_FAIL_MS) {
+      this.discardModels('inference keeps failing', true)
+    }
+  }
+
+  /**
+   * Throw the landmarker away and start over (a broken GPU context, a WASM abort, or
+   * after sleep). Repeated failures release the camera and back off.
+   */
+  private discardModels(reason: string, failure: boolean): void {
+    console.warn('[detection] rebuilding the posture model:', reason)
+    this.modelGen++
+    try {
+      this.landmarker?.close()
+    } catch {
+      // already broken
+    }
+    this.landmarker = null
+    this.delegate = null
+    this.masksOn = false
+    this.firstInferenceOk = false
+    this.inferFailures = 0
+    this.releaseFace()
+    if (failure) {
+      this.rebuilds++
+      this.lastRebuildAt = performance.now()
+      this.setDetectorError('inference')
+    }
+    if (!this.wantRunning) return
+    if (failure && this.rebuilds > 1) {
+      this.releaseCamera()
+      this.updateStatus({ running: false, delegate: null, measuredFps: 0 })
+      this.scheduleRetry('model')
+    } else {
+      void this.restart()
+    }
   }
 
   /** Switches segmentation output on/off to match whether anyone can see the mesh. */
@@ -412,7 +1084,7 @@ class DetectionController {
     if (!this.masksOn) {
       this.meshBuilder.reset()
       this.releaseFace()
-      useAppStore.setState({ mesh: null })
+      if (useAppStore.getState().mesh) useAppStore.setState({ mesh: null })
     }
   }
 
@@ -427,14 +1099,7 @@ class DetectionController {
       await this.landmarker.setOptions({ outputSegmentationMasks: false })
     } catch (err) {
       console.error('[detection] landmarker unusable after the segmentation failure — recreating it:', err)
-      try {
-        this.landmarker.close()
-      } catch {
-        // already broken
-      }
-      this.landmarker = null
-      this.delegate = null
-      if (this.wantRunning) void this.restart()
+      this.discardModels('segmentation switch broke the pose graph', false)
     }
   }
 
@@ -473,7 +1138,7 @@ class DetectionController {
 
   private detectFace(t: number): FaceInput | null {
     if (!this.face || !this.video) return null
-    if (this.session && !this.faceDuringCapture) return null
+    if (this.setupRunning() && !this.faceDuringSetup) return null
     try {
       const points = this.face.detectForVideo(this.video, t).faceLandmarks?.[0]
       return points ? { points, topology: faceMeshTopology() } : null
@@ -494,7 +1159,7 @@ class DetectionController {
       return null
     }
     try {
-      return this.meshBuilder.update(mask.getAsFloat32Array(), mask.width, mask.height, frame, t, this.detectFace(t))
+      return this.meshBuilder.update(mask.getAsFloat32Array(), mask.width, mask.height, frame.image, t, this.detectFace(t))
     } catch (err) {
       // purely cosmetic — never let it take posture detection down with it
       console.warn('[detection] body mesh failed — falling back to the skeleton:', err)
@@ -502,6 +1167,69 @@ class DetectionController {
       useAppStore.setState({ meshUnavailable: true })
       return null
     }
+  }
+
+  // ───────────────────────────── publishing ─────────────────────────────
+
+  /**
+   * The Lines overlay data: ≤ 15 Hz, only while the window is visible. The mesh (if
+   * on) goes out with every frame — MeshOverlay reads it outside React.
+   */
+  private publishPose(
+    frame: Frame,
+    features: PostureFeatures | null,
+    snapshot: PostureSnapshot,
+    mesh: BodyMesh | null,
+    t: number
+  ): void {
+    const s = useAppStore.getState()
+    if (!this.windowVisible) {
+      if (s.pose || s.mesh) useAppStore.setState({ pose: null, mesh: null })
+      return
+    }
+    const patch: { pose?: AppStatePose; mesh?: BodyMesh | null } = {}
+    if (mesh !== s.mesh) patch.mesh = mesh
+    if (!frame) {
+      if (s.pose) patch.pose = null
+    } else if (t - this.lastPoseAt >= POSE_MIN_INTERVAL_MS) {
+      this.lastPoseAt = t
+      patch.pose = {
+        image: frame.image,
+        aspect: frame.aspect,
+        guide: overlayGuide(frame, features),
+        segments: segmentStages(snapshot)
+      }
+    }
+    if (patch.pose !== undefined || patch.mesh !== undefined) useAppStore.setState(patch)
+  }
+
+  /** The store's snapshot changes only when something on screen would (or ~1×/s while visible). */
+  private publishSnapshot(s: PostureSnapshot, t: number): void {
+    this.latestSnapshot = s
+    const key = `${s.presence}|${s.worstStage}|${s.calibrated}|${s.recalibrationSuggested}|${ISSUES.map(
+      (i) => s.issues[i].stage
+    ).join(',')}|${s.issues.lean.direction ?? ''}|${s.readout?.view ?? ''}`
+    const due = this.windowVisible && t - this.lastUiSnapshotAt >= UI_SNAPSHOT_INTERVAL_MS
+    if (key !== this.lastUiSnapshotKey || due) {
+      this.lastUiSnapshotKey = key
+      this.lastUiSnapshotAt = t
+      useAppStore.setState({ snapshot: s })
+    }
+  }
+
+  private onVisibility(visible: boolean): void {
+    this.visibilityKnown = true
+    this.windowVisible = visible
+    const patch: Partial<{ windowVisible: boolean; snapshot: PostureSnapshot | null; pose: null; mesh: null }> = {
+      windowVisible: visible
+    }
+    // shown: be current immediately; hidden: drop the per-frame data nobody can see
+    if (visible && this.latestSnapshot) patch.snapshot = this.latestSnapshot
+    if (!visible) {
+      patch.pose = null
+      patch.mesh = null
+    }
+    useAppStore.setState(patch)
   }
 
   private maybeSendSnapshot(snapshot: PostureSnapshot, t: number): void {
@@ -523,7 +1251,23 @@ class DetectionController {
     }
   }
 
-  // ---------- settings / status ----------
+  // ───────────────────────────── settings / status ─────────────────────────────
+
+  private presetFps(): number {
+    return PRESET_FPS[this.settings?.performancePreset ?? 'balanced'] ?? PRESET_FPS.balanced
+  }
+
+  /** The preset rate, raised to at least 'balanced' while setup runs (enough frames for the capture). */
+  private targetFps(): number {
+    const preset = this.presetFps()
+    return this.setupRunning() ? Math.max(PRESET_FPS.balanced, preset) : preset
+  }
+
+  private applyLoopFps(): void {
+    const fps = this.targetFps()
+    if (this.loop && Math.abs(this.loop.fps - fps) > 0.01) this.loop.setFps(fps)
+    if (this.status.targetFps !== fps) this.updateStatus({ targetFps: fps })
+  }
 
   private applySettings(next: Settings): void {
     const prev = this.settings
@@ -532,21 +1276,35 @@ class DetectionController {
     if (!this.engine) return
 
     this.engine.updateSettings(toEngineSettings(next))
-    if (JSON.stringify(prev?.calibration ?? null) !== JSON.stringify(next.calibration ?? null)) {
-      this.engine.setBaseline(next.calibration)
+    this.syncBaseline()
+    if (!aiAvailable(next)) this.cancelAiCheck()
+    // the AI second opinion for setup was turned on or off (e.g. from the setup flow's AI
+    // sheet): a session decides about its reviewer once, so coach again with a fresh one
+    if (
+      prev &&
+      this.setupWanted &&
+      this.setupStage === 'coach' &&
+      this.session &&
+      aiReviewsSetup(prev) !== aiReviewsSetup(next) &&
+      this.lastSetupPhase !== 'done' &&
+      this.lastSetupPhase !== 'reviewing'
+    ) {
+      this.newSession()
     }
     if (prev && prev.cameraDeviceId !== next.cameraDeviceId && this.wantRunning) {
+      this.retryDelay = RETRY_BASE_MS
       void this.restart()
       return
     }
-    if (prev && prev.performancePreset !== next.performancePreset) {
-      const fps = PRESET_FPS[next.performancePreset]
-      this.loop?.setFps(fps)
-      this.updateStatus({ targetFps: fps })
-    }
+    if (prev && prev.performancePreset !== next.performancePreset) this.applyLoopFps()
     if (prev && prev.delegate !== next.delegate) {
       // delegate preference changed: rebuild the landmarkers on next start
-      this.landmarker?.close()
+      this.modelGen++
+      try {
+        this.landmarker?.close()
+      } catch {
+        // best-effort
+      }
       this.landmarker = null
       this.delegate = null
       this.releaseFace()
@@ -554,32 +1312,58 @@ class DetectionController {
       this.masksFailed = false
       this.faceFailed = false
       this.faceGpuBroken = false
+      this.rebuilds = 0
+      this.modelRetryDelay = MODEL_RETRY_BASE_MS
       useAppStore.setState({ meshUnavailable: false })
       if (this.wantRunning) void this.restart()
     }
   }
 
   private updateStatus(patch: Partial<DetectionStatus>): void {
-    this.status = { ...this.status, ...patch }
+    const next = { ...this.status, ...patch }
+    if (JSON.stringify(next) === JSON.stringify(this.status)) return
+    this.status = next
     useAppStore.setState({ detection: this.status })
     window.sitsense.sendDetectionStatus(this.status)
   }
 
-  private async refreshCameraList(): Promise<void> {
-    try {
-      useAppStore.setState({ cameras: await listCameras() })
-    } catch {
-      // enumeration can fail before any grant — ignore
+  private setDetectorError(e: DetectorError, reason: DetectorErrorReason = null): void {
+    const s = useAppStore.getState()
+    const r = e === 'model' ? reason : null
+    if (s.detectorError !== e || s.detectorErrorReason !== r) useAppStore.setState({ detectorError: e, detectorErrorReason: r })
+  }
+
+  private setCameraUi(c: CameraUiState): void {
+    const cur = useAppStore.getState().camera
+    if (
+      cur.activeDeviceId !== c.activeDeviceId ||
+      cur.activeLabel !== c.activeLabel ||
+      cur.usingFallback !== c.usingFallback
+    ) {
+      useAppStore.setState({ camera: c })
     }
   }
 
-  private scheduleRetry(): void {
+  private async refreshCameraList(): Promise<{ deviceId: string; label: string }[] | null> {
+    try {
+      const cams = await listCameras()
+      useAppStore.setState({ cameras: cams })
+      return cams
+    } catch {
+      // enumeration can fail before any grant — ignore
+      return null
+    }
+  }
+
+  private scheduleRetry(kind: 'camera' | 'model'): void {
     if (!this.wantRunning || this.retryTimer) return
+    const delay = kind === 'camera' ? this.retryDelay : this.modelRetryDelay
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null
-      this.retryDelay = Math.min(this.retryDelay * 2, RETRY_MAX_MS)
+      if (kind === 'camera') this.retryDelay = Math.min(this.retryDelay * 2, RETRY_MAX_MS)
+      else this.modelRetryDelay = Math.min(this.modelRetryDelay * 2, MODEL_RETRY_MAX_MS)
       if (this.wantRunning) void this.start()
-    }, this.retryDelay)
+    }, delay)
   }
 
   private clearRetry(): void {
@@ -587,6 +1371,8 @@ class DetectionController {
     this.retryTimer = null
   }
 }
+
+type AppStatePose = ReturnType<typeof useAppStore.getState>['pose']
 
 function toEngineSettings(s: Settings): EngineSettings {
   return {

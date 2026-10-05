@@ -1,20 +1,30 @@
 @import 'tailwindcss';
 
-/* SitSense "Calm Instrument" design tokens — docs/specs/ui.md */
+/* SitSense "Calm Instrument" design tokens — docs/specs/ui-v3.md §1 (ui.md = history) */
 @theme {
   --color-ink: #171512;
   --color-surface: #1e1b17;
   --color-card: #252119;
+  /* v3: raised surfaces (hover rows, inputs, popovers, selected category, user bubbles) */
+  --color-card-2: #2c2720;
   --color-hairline: #37322a;
+  /* v3: borders that must be visible (inputs on hover, dashed "unavailable" tracks) */
+  --color-hairline-strong: #4a4339;
   --color-text: #ede7dc;
   --color-text-dim: #a39c8f;
   --color-text-faint: #6b655a;
   --color-sage: #93c9a2;
   --color-sage-deep: #3a5c45;
+  /* v3: selected / active backgrounds (nav item, segmented selection, chips) */
+  --color-sage-soft: rgb(147 201 162 / 0.12);
   --color-amber: #e5b96b;
   --color-ember: #e08a56;
   --color-coral: #e0655c;
   --color-slate-cool: #8fa3b8;
+  /* v3: glass chips over the camera (+ backdrop-blur-md) */
+  --color-scrim: rgb(23 21 18 / 0.72);
+  /* v3: posture setup flow background */
+  --color-setup-bg: #14130f;
 
   --font-display: 'Bricolage Grotesque Variable', 'Segoe UI Variable', 'Segoe UI', sans-serif;
   --font-sans: 'Hanken Grotesk Variable', 'Segoe UI Variable', 'Segoe UI', sans-serif;
@@ -33,6 +43,156 @@ body {
   overflow: hidden;
 }
 
+/* thin, quiet scrollbars everywhere — via ::-webkit-scrollbar, not scrollbar-width/-color:
+   once the standard properties are set Chromium ignores these rules, and its standard thin
+   scrollbar on Windows keeps the arrow buttons */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-hairline);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-text-faint);
+}
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* ───────────────────────── type scale (§1.3) — never use sizes outside it ───────────────────────── */
+
+@utility type-micro {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+@utility type-caption {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 16px;
+}
+@utility type-body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 18px;
+}
+@utility type-body-lg {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 21px;
+}
+/* numbers with a unit, timers, percentages */
+@utility type-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+@utility type-value-lg {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+@utility type-title {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 600;
+}
+/* nav labels */
+@utility type-nav {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+@utility type-h3 {
+  font-family: var(--font-display);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+@utility type-h2 {
+  font-family: var(--font-display);
+  font-size: 26px;
+  line-height: 32px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+@utility type-h1 {
+  font-family: var(--font-display);
+  font-size: 32px;
+  line-height: 38px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+@utility type-score {
+  font-family: var(--font-display);
+  font-size: 44px;
+  line-height: 44px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ───────────────────────── elevation (§1.4) ───────────────────────── */
+
+/* e1 card */
+@utility surface-card {
+  background-color: var(--color-card);
+  border-radius: 16px;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.035),
+    0 0 0 1px rgb(255 255 255 / 0.06);
+}
+/* e2 raised */
+@utility surface-raised {
+  background-color: var(--color-card-2);
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.1),
+    0 8px 24px -12px rgb(0 0 0 / 0.6);
+}
+/* e3 popover */
+@utility surface-popover {
+  background-color: var(--color-card-2);
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.12),
+    0 16px 40px -12px rgb(0 0 0 / 0.7);
+}
+/* camera preview */
+@utility surface-hero {
+  background-color: #000;
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.06);
+}
+/* glass chip over the camera */
+@utility surface-glass {
+  background-color: var(--color-scrim);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.1);
+}
+
+/* ───────────────────────── motion (§8.2) — always used behind motion-safe: ───────────────────────── */
+
 /* the only glow in the app: the Spine Glyph's breathing halo */
 @keyframes breathe {
   0%,
@@ -44,13 +204,43 @@ body {
   }
 }
 
-.titlebar-drag {
-  -webkit-app-region: drag;
-}
-.titlebar-no-drag {
-  -webkit-app-region: no-drag;
+/* screen change: 180 ms fade + 4 px rise */
+@keyframes screenIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
+/* setup enter: 220 ms fade + scale 0.98 → 1 */
+@keyframes setupIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* list rows in (chat, issues): 150 ms fade + 6 px rise */
+@keyframes rowIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* tooltips / popovers / menus: 120 ms fade + 4 px slide */
 @keyframes menuIn {
   from {
     opacity: 0;
@@ -59,6 +249,14 @@ body {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 
@@ -71,26 +269,147 @@ body {
   }
 }
 
-/* hologram preview style: faint CRT scanlines over the darkened feed */
+/* monitoring dot: 2 s soft pulse, opacity 0.6 → 1 */
+@keyframes softPulse {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* thinking dots: 1.2 s loop, staggered 150 ms by the caller */
+@keyframes thinkingDot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+/* skeleton / camera-starting shimmer: white/3 → white/6, 1.4 s */
+@keyframes shimmer {
+  0%,
+  100% {
+    background-color: rgb(255 255 255 / 0.03);
+  }
+  50% {
+    background-color: rgb(255 255 255 / 0.06);
+  }
+}
+
+/* indeterminate bar (AI review pending) */
+@keyframes shimmerSlide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* hologram / "dim camera behind mesh": faint CRT scanlines over the darkened feed */
 .hologram-scanlines {
   background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.045) 0 1px, transparent 1px 3px);
   mix-blend-mode: screen;
 }
 
-/* range input thumb in sage */
+/* ───────────────────────── slider (§1.5): 20 px hit area, 4 px track, sage fill to the thumb ───────────────────────── */
+
+.slider-sage {
+  --fill: 0%;
+  height: 20px;
+  background: transparent;
+}
+.slider-sage::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    var(--color-sage) 0 var(--fill),
+    var(--color-hairline) var(--fill) 100%
+  );
+}
+.slider-sage:disabled::-webkit-slider-runnable-track {
+  background: var(--color-hairline);
+}
 .slider-sage::-webkit-slider-thumb {
   appearance: none;
   width: 14px;
   height: 14px;
+  margin-top: -5px;
   border-radius: 9999px;
   background: var(--color-sage);
+  box-shadow: 0 0 0 3px var(--color-ink);
   cursor: pointer;
   transition: transform 120ms ease-out;
 }
-.slider-sage::-webkit-slider-thumb:hover {
+.slider-sage:not(:disabled)::-webkit-slider-thumb:hover {
   transform: scale(1.15);
+}
+.slider-sage:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
+  background: var(--color-text-faint);
 }
 .slider-sage:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-sage) 70%, transparent);
+}
+.slider-sage:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 3px var(--color-ink),
+    0 0 0 5px color-mix(in srgb, var(--color-sage) 70%, transparent);
+}
+
+/* Lines camera overlay (components/PoseLinesOverlay.tsx): ease the geometry between
+   detection frames (5–15 fps) and the colors between stages. Geometry is set through the
+   CSS `d` / `cx` / `cy` properties so Chromium can interpolate it. */
+.pose-lines path,
+.pose-lines circle {
+  transition:
+    d var(--pose-ease, 120ms) linear,
+    cx var(--pose-ease, 120ms) linear,
+    cy var(--pose-ease, 120ms) linear,
+    stroke 300ms ease-out,
+    fill 300ms ease-out;
+}
+
+/* score ring arc (400 ms) and gauge marker (250 ms) */
+.ss-ring-arc {
+  transition:
+    stroke-dashoffset 400ms ease-out,
+    stroke 400ms ease-out;
+}
+.ss-gauge-marker {
+  transition:
+    left 250ms ease-out,
+    background-color 250ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pose-lines path,
+  .pose-lines circle,
+  .ss-ring-arc,
+  .ss-gauge-marker {
+    transition: none;
+  }
 }

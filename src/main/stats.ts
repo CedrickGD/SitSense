@@ -1,7 +1,9 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { app } from 'electron'
 import type { PostureSnapshot, StatMinute, TodayStats } from '../shared/posture'
+import { STATS_RANGE_MAX_DAYS, computeStreak, emptyDay, lastDateKeys, summarizeDay, type DaySummary, type StatsRange } from '../shared/stats'
 import { getPauseState } from './pause'
 
 /**
@@ -20,8 +22,13 @@ let lastSnapshotAt = 0
 let currentMinute = -1
 let minuteCounts = new Map<StatMinute['s'], number>()
 let minutes: StatMinute[] = []
+/** today's posture nudges / breaks taken (stored in the day file next to the minutes) */
+let alerts = 0
+let breaks = 0
 let sampleTimer: NodeJS.Timeout | null = null
 let writePending = false
+/** summaries of finished days (their files no longer change); dropped at midnight rollover */
+const pastDayCache = new Map<string, DaySummary>()
 
 const statsDir = (): string => join(app.getPath('userData'), 'stats')
 const todayKey = (): string => {
@@ -52,7 +59,58 @@ export function getTodayStats(): TodayStats {
   const partial = dominant()
   const out = [...minutes]
   if (partial && currentMinute > 0) out.push({ m: currentMinute, s: partial })
-  return { date: loadedDate || todayKey(), minutes: out }
+  return { date: loadedDate || todayKey(), minutes: out, alerts, breaks }
+}
+
+/** a posture nudge was shown (counted per day for the history view) */
+export function statsRecordAlert(): void {
+  rollDayIfNeeded()
+  alerts++
+  scheduleWrite()
+}
+
+/** the user took a break after a sitting stretch (main/breaks.ts) */
+export function statsRecordBreak(): void {
+  rollDayIfNeeded()
+  breaks++
+  scheduleWrite()
+}
+
+export function getBreaksToday(): number {
+  return loadedDate === todayKey() ? breaks : 0
+}
+
+/** Clamp/validate the IPC argument: a whole number of days in 1..90. */
+export function normalizeRangeDays(days: unknown): number {
+  if (typeof days !== 'number' || !Number.isFinite(days)) throw new TypeError('days must be a number in 1..90')
+  return Math.min(STATS_RANGE_MAX_DAYS, Math.max(1, Math.round(days)))
+}
+
+async function readDaySummary(date: string): Promise<DaySummary> {
+  const cached = pastDayCache.get(date)
+  if (cached) return cached
+  let summary: DaySummary
+  try {
+    const raw = JSON.parse(await readFile(join(statsDir(), `${date}.json`), 'utf8')) as Partial<TodayStats>
+    summary = summarizeDay(date, raw)
+  } catch (err) {
+    // a missing file is a day without data; anything else (locked, half-written) is retried next time
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') return emptyDay(date)
+    summary = emptyDay(date)
+  }
+  if (pastDayCache.size > STATS_RANGE_MAX_DAYS * 2) pastDayCache.clear()
+  pastDayCache.set(date, summary)
+  return summary
+}
+
+/** Per-day summaries for the last `days` local days (today included, oldest first) plus the streak. */
+export async function getStatsRange(rawDays: unknown): Promise<StatsRange> {
+  const days = normalizeRangeDays(rawDays)
+  rollDayIfNeeded()
+  const today = todayKey()
+  const keys = lastDateKeys(new Date(), days)
+  const list = await Promise.all(keys.map((d) => (d === today ? Promise.resolve(summarizeDay(d, getTodayStats())) : readDaySummary(d))))
+  return { days: list, streak: computeStreak(list) }
 }
 
 function currentStateKey(): StatMinute['s'] {
@@ -73,15 +131,23 @@ function sample(): void {
   if (nowMinute !== currentMinute) {
     finishMinute()
     currentMinute = nowMinute
-    if (todayKey() !== loadedDate) {
-      // midnight rollover — start a fresh day file
-      flush()
-      minutes = []
-      loadedDate = todayKey()
-    }
+    rollDayIfNeeded()
   }
   const key = currentStateKey()
   minuteCounts.set(key, (minuteCounts.get(key) ?? 0) + 1)
+}
+
+/** midnight rollover — write out the finished day, start a fresh day file */
+function rollDayIfNeeded(): void {
+  if (!loadedDate || todayKey() === loadedDate) return
+  // the minute in progress still belongs to the day that just ended
+  finishMinute()
+  flush()
+  pastDayCache.delete(loadedDate)
+  minutes = []
+  alerts = 0
+  breaks = 0
+  loadedDate = todayKey()
 }
 
 function dominant(): StatMinute['s'] | null {
@@ -113,8 +179,13 @@ function loadToday(): void {
   try {
     const raw = JSON.parse(readFileSync(join(statsDir(), `${loadedDate}.json`), 'utf8')) as TodayStats
     if (Array.isArray(raw.minutes)) minutes = raw.minutes.filter((m) => typeof m?.m === 'number')
+    const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0)
+    alerts = n(raw.alerts)
+    breaks = n(raw.breaks)
   } catch {
     minutes = []
+    alerts = 0
+    breaks = 0
   }
 }
 
@@ -132,7 +203,7 @@ function flush(): void {
     mkdirSync(statsDir(), { recursive: true })
     const file = join(statsDir(), `${loadedDate || todayKey()}.json`)
     const tmp = `${file}.tmp`
-    writeFileSync(tmp, JSON.stringify({ date: loadedDate, minutes } satisfies TodayStats))
+    writeFileSync(tmp, JSON.stringify({ date: loadedDate, minutes, alerts, breaks } satisfies TodayStats))
     renameSync(tmp, file)
   } catch (err) {
     console.error('[stats] write failed:', err)
@@ -151,4 +222,19 @@ function pruneOld(): void {
   } catch {
     // stats dir may not exist yet
   }
+}
+
+/** Test-only: reset module state between cases. */
+export function __resetStatsForTests(): void {
+  if (sampleTimer) clearInterval(sampleTimer)
+  sampleTimer = null
+  lastSnapshot = null
+  lastSnapshotAt = 0
+  currentMinute = -1
+  minuteCounts = new Map()
+  minutes = []
+  alerts = 0
+  breaks = 0
+  loadedDate = ''
+  pastDayCache.clear()
 }

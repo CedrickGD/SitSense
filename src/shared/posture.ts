@@ -31,6 +31,19 @@ export interface IssueSnapshot {
   direction?: 'left' | 'right'
 }
 
+export type ViewKind = 'front' | 'angled' | 'side'
+
+/** Live deviations from the baseline for the UI (docs/specs/detection.md §9). */
+export interface PostureReadout {
+  view: ViewKind
+  /** degrees / cm; null when not measurable from this view right now */
+  neckFwd: number | null
+  trunkFwd: number | null
+  drop: number | null
+  forward: number | null
+  lateral: number | null
+}
+
 export interface PostureSnapshot {
   presence: PresenceState
   issues: Record<IssueId, IssueSnapshot>
@@ -38,6 +51,7 @@ export interface PostureSnapshot {
   calibrated: boolean
   /** the camera view has drifted far from the calibrated distance for a while */
   recalibrationSuggested: boolean
+  readout?: PostureReadout
   ts: number
 }
 
@@ -52,46 +66,61 @@ export interface PostureAlert {
   direction?: 'left' | 'right'
 }
 
-/** Which landmark groups were usable during calibration. */
-export interface CalibrationCapabilities {
-  shoulders: boolean
-  ears: boolean
-  eyes: boolean
-}
+export type Vec3 = [number, number, number]
+
+export type UpSource = 'body' | 'hips' | 'camera'
 
 /**
- * Numeric baseline captured while the user sits upright. Only numbers —
- * no image data is ever stored. See docs/specs/detection.md §3.
+ * Numeric baseline captured once the AI judged the posture good. Only numbers —
+ * no image data is ever stored. Angles in degrees, lengths in metres, vectors
+ * in camera coordinates (x right, y down, z away from the camera).
+ * See docs/specs/detection.md §7.
  */
 export interface CalibrationBaseline {
+  version: 2
   capturedAt: number
   cameraDeviceId: string | null
-  capabilities: CalibrationCapabilities
-  /** raw scales at calibration (normalized image units) */
-  sSh0: number | null
-  sEar0: number | null
-  sEye0: number | null
-  /** baseline unit (shoulder width or derived) + fallback ratios */
-  U0: number
-  REar: number | null
-  REye: number | null
-  /** vertical positions */
-  ySh0: number | null
-  yHd0: number | null
-  /** head-above-shoulder gap in scale units */
-  h0: number | null
-  /** face-scale / shoulder-scale ratio */
-  r0: number | null
-  /** nose-below-ears pitch proxy (ear-referenced) */
-  p0: number | null
-  /** nose-below-eyes pitch proxy (eye-referenced, for the ears-hidden fallback) */
-  pEye0: number | null
-  /** ear-line, eye-line and shoulder-line angles (degrees) */
-  phiHead0: number | null
-  phiEye0: number | null
-  phiSh0: number | null
-  /** lateral head offset in scale units */
-  o0: number | null
+  /** gravity "up" in camera coordinates (unit vector) and how it was estimated */
+  up: Vec3
+  upSource: UpSource
+  /** body forward (toward the screen) at capture, unit vector */
+  forward: Vec3
+  view: { kind: ViewKind; yawDeg: number; elevationDeg: number }
+  /** the AI judged this posture good (false = the user saved it anyway) */
+  verified: boolean
+  neckFwd: number
+  /** null when both ears and both shoulders were not in view at capture (e.g. a profile camera) */
+  neckLat: number | null
+  /** what neckLat was measured against (absent in older baselines: 'trunk' iff trunkLat !== null) */
+  neckLatRef?: 'trunk' | 'gravity'
+  headPitch: number | null
+  headRollRel: number | null
+  shoulderTilt: number | null
+  trunkFwd: number | null
+  trunkLat: number | null
+  torsoLen: number | null
+  /** image-plane vertical ear→shoulder distance (m), front views only */
+  neckH: number | null
+  /** image height-units per metre at the body */
+  ppm: number
+  /** upper-body anchor (shoulder point) position, camera-frame metres */
+  anchor: Vec3
+}
+
+/** True for a baseline written by the current (v2) detection engine. */
+export function isCurrentBaseline(b: unknown): b is CalibrationBaseline {
+  if (b === null || typeof b !== 'object') return false
+  const c = b as Partial<CalibrationBaseline>
+  const vec = (v: unknown): boolean => Array.isArray(v) && v.length === 3 && v.every((n) => Number.isFinite(n))
+  return (
+    c.version === 2 &&
+    vec(c.up) &&
+    vec(c.forward) &&
+    vec(c.anchor) &&
+    Number.isFinite(c.ppm) &&
+    (c.ppm as number) > 0 &&
+    Number.isFinite(c.neckFwd)
+  )
 }
 
 export type CameraError = 'in-use' | 'not-found' | 'denied' | null
@@ -115,4 +144,8 @@ export interface StatMinute {
 export interface TodayStats {
   date: string // YYYY-MM-DD local
   minutes: StatMinute[]
+  /** posture nudges shown that day (absent in files written before it was counted) */
+  alerts?: number
+  /** breaks taken after a sitting stretch (see main/break-tracker.ts) */
+  breaks?: number
 }

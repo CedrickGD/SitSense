@@ -1,12 +1,16 @@
 // Verifies the PACKAGED build (asar, app.isPackaged=true): MediaPipe must load
 // offline via app:// and the tray icons must resolve from app.asar.unpacked.
-// Usage: node scripts/drive-packaged.mjs <screenshot-dir>
+// Usage: node scripts/drive-packaged.mjs [screenshot-dir]
+// Screenshots contain the live webcam preview, so they default to a temp dir
+// outside the repo (never commit them).
 import { mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _electron } from 'playwright'
 
-const shotDir = process.argv[2] ?? 'screenshots'
+const shotDir = process.argv[2] ?? join(tmpdir(), 'sitsense-screenshots')
 mkdirSync(shotDir, { recursive: true })
+console.log(`[drive-packaged] screenshots -> ${shotDir}`)
 
 const app = await _electron.launch({
   executablePath: 'dist/win-unpacked/SitSense.exe',

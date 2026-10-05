@@ -5,13 +5,15 @@
     <title>SitSense</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!--
+      PRODUCTION CSP: the renderer reaches nothing outside app:// (no http(s):, no ws:).
       'wasm-unsafe-eval' is required by the MediaPipe WASM runtime.
-      'unsafe-inline' script-src is required by the React dev-server preamble only,
-      but the app loads no remote content whatsoever, so the practical exposure is nil.
+      The dev server adds ws: (HMR) and script-src 'unsafe-inline' (React Refresh
+      preamble) at serve time only, and the build fails if this tag allows either
+      (cspPlugin in electron.vite.config.ts).
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: blob: data:; media-src 'self' blob: mediastream:; worker-src 'self' blob:"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob: data:; media-src 'self' blob: mediastream:; worker-src 'self' blob:"
     />
   </head>
   <body>

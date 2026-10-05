@@ -22,21 +22,23 @@ function toastIcon(name: string): string | undefined {
 /**
  * The renderer's episode state machines decide WHEN an alert is warranted
  * (dwell, hysteresis, cooldown, escalation) — this module only decides
- * WHETHER the user wants to hear about it, and renders the toast.
+ * WHETHER the user wants to hear about it, and renders the toast. Returns
+ * true when a nudge was shown (main counts those in the day stats).
  */
-export function fireAlert(alert: PostureAlert): void {
+export function fireAlert(alert: PostureAlert): boolean {
   const s = getSettings()
-  if (getPauseState().paused) return // a last frame can race the pause switch
-  if (!s.notifications.enabled) return
-  if (alert.kind === 'recovery') return // v1: tracked silently
+  if (getPauseState().paused) return false // a last frame can race the pause switch
+  if (!s.notifications.enabled) return false
+  if (alert.kind === 'recovery') return false // v1: tracked silently
   const issue = s.issues[alert.issue]
-  if (!issue?.enabled) return
-  if (alert.stage < 1 || alert.stage > 3) return
-  if (!issue.notifyStages[(alert.stage - 1) as 0 | 1 | 2]) return
-  if (alert.kind === 'escalation' && !s.notifications.escalation) return
+  if (!issue?.enabled) return false
+  if (alert.stage < 1 || alert.stage > 3) return false
+  if (!issue.notifyStages[(alert.stage - 1) as 0 | 1 | 2]) return false
+  if (alert.kind === 'escalation' && !s.notifications.escalation) return false
 
   const { title, body } = composeToast(alert, picker)
   showToast(title, body, !s.notifications.sound, toastIcon(`${alert.issue}-${alert.stage}`))
+  return true
 }
 
 export function testNotification(): void {
@@ -46,6 +48,32 @@ export function testNotification(): void {
     !getSettings().notifications.sound,
     toastIcon('good')
   )
+}
+
+/** Kept referenced while shown: a GC'd Notification no longer delivers its action/click events. */
+let updateToast: Notification | null = null
+
+/**
+ * The one toast for updates (src/main/updater.ts): an installed build finished
+ * downloading `version`. Restart installs it now; otherwise it installs when SitSense quits.
+ */
+export function updateReadyToast(version: string, onRestart: () => void): void {
+  if (!Notification.isSupported()) return
+  const icon = toastIcon('good')
+  const n = new Notification({
+    title: `SitSense ${version} is ready — restart to update`,
+    body: 'Takes a few seconds, then monitoring picks up again. Otherwise it installs the next time SitSense quits.',
+    silent: true,
+    actions: [{ type: 'button', text: 'Restart' }],
+    ...(icon ? { icon } : {})
+  })
+  n.on('action', () => onRestart())
+  n.on('click', () => showMainWindow())
+  n.on('close', () => {
+    if (updateToast === n) updateToast = null
+  })
+  updateToast = n
+  n.show()
 }
 
 export function trayHint(): void {

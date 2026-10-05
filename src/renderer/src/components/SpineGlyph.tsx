@@ -7,9 +7,14 @@ interface SpineGlyphProps {
   issue: IssueId | null
   stage: Stage
   direction?: 'left' | 'right'
-  /** paused/away render styles */
-  mode?: 'normal' | 'paused' | 'away'
+  /**
+   * paused/away render styles; 'off' = not watching right now (camera or detector
+   * unavailable, still starting): dashed faint outline, no glow
+   */
+  mode?: 'normal' | 'paused' | 'away' | 'off'
   breathing?: boolean
+  /** extra classes on the <svg>, e.g. a CSS size override for short windows */
+  className?: string
 }
 
 const SEG_Y = [8, 26, 44, 62, 80]
@@ -26,15 +31,17 @@ export default function SpineGlyph({
   stage,
   direction = 'right',
   mode = 'normal',
-  breathing = true
+  breathing = true,
+  className
 }: SpineGlyphProps): JSX.Element {
   const k = stage / 3 // deformation intensity
   const color =
     mode === 'paused'
       ? 'var(--color-slate-cool)'
-      : mode === 'away'
+      : mode === 'away' || mode === 'off'
         ? 'var(--color-text-faint)'
         : STAGE_COLOR[stage]
+  const outlined = mode === 'away' || mode === 'off'
   const dirSign = direction === 'left' ? -1 : 1
 
   const segments = SEG_Y.map((y, i) => {
@@ -62,6 +69,7 @@ export default function SpineGlyph({
       height={size}
       viewBox="0 0 64 96"
       aria-hidden
+      className={className}
       style={{ overflow: 'visible' }}
     >
       {stage === 0 && mode === 'normal' && breathing && (
@@ -84,9 +92,10 @@ export default function SpineGlyph({
             width={14}
             height={12}
             rx={6}
-            fill={mode === 'away' ? 'none' : color}
-            stroke={mode === 'away' ? color : 'none'}
-            strokeWidth={mode === 'away' ? 2.5 : 0}
+            fill={outlined ? 'none' : color}
+            stroke={outlined ? color : 'none'}
+            strokeWidth={outlined ? 2.5 : 0}
+            strokeDasharray={mode === 'off' ? '4 3' : undefined}
             style={{
               transition: 'x 300ms ease-out, y 300ms ease-out, fill 200ms linear',
               ...(issue === 'tooClose' && stage > 0 ? { filter: `blur(${0.6 * k}px)` } : {})

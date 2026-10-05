@@ -1,15 +1,22 @@
 // Dev-only driver: launches the BUILT app (out/main/index.js → app:// protocol,
 // the packaged-offline code path) under Playwright and walks the main screens.
-// Usage: node scripts/drive.mjs <screenshot-dir>
+// Usage: node scripts/drive.mjs [screenshot-dir]
+// Screenshots contain the live webcam preview, so they default to a temp dir
+// outside the repo (never commit them).
 import { mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _electron } from 'playwright'
 
-const shotDir = process.argv[2] ?? 'screenshots'
+const shotDir = process.argv[2] ?? join(tmpdir(), 'sitsense-screenshots')
 mkdirSync(shotDir, { recursive: true })
+console.log(`[drive] screenshots -> ${shotDir}`)
 const shot = (page, name) => page.screenshot({ path: join(shotDir, name) })
 
-const app = await _electron.launch({ args: ['out/main/index.js'] })
+// launch the app ROOT ('.'), like `electron-vite preview` does: package.json
+// "main" points at out/main/index.js, and app.getAppPath()/app.name then match
+// a real run (resources/ resolves, data goes to the app's own userData)
+const app = await _electron.launch({ args: ['.'] })
 const page = await app.firstWindow()
 
 const consoleLines = []

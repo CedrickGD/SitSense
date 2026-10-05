@@ -5,6 +5,13 @@ dist/
 .DS_Store
 *.local
 
+# tsc -b incremental caches — rewritten on every typecheck
+*.tsbuildinfo
+
+# Playwright driver output (scripts/drive*.mjs) — contains live webcam frames
+screenshots/
+shots/
+
 # fetched at install time by scripts/fetch-assets.mjs — never committed
 src/renderer/public/mediapipe/
 src/renderer/public/models/

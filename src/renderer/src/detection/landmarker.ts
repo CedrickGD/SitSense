@@ -18,6 +18,20 @@ async function create(delegate: 'GPU' | 'CPU'): Promise<PoseLandmarker> {
   })
 }
 
+/**
+ * Any WebGL at all (WebGL2 or 1, incl. Windows' WARP software renderer). MediaPipe needs a
+ * WebGL context to read video frames even on its CPU path; without one every inference
+ * fails ("activeTexture of undefined") and rebuilding the model can never help.
+ */
+export function webglAvailable(): boolean {
+  try {
+    const c = document.createElement('canvas')
+    return (c.getContext('webgl2') ?? c.getContext('webgl')) !== null
+  } catch {
+    return false
+  }
+}
+
 function webgl2Available(): boolean {
   try {
     return document.createElement('canvas').getContext('webgl2') !== null
@@ -30,19 +44,26 @@ function webgl2Available(): boolean {
  * GPU delegate with CPU fallback. Some GPU failures only surface at the first
  * inference, so the caller must also route a failed first detect through
  * recreateAsCpu().
+ *
+ * `gpuFailed` is true only when the GPU graph was actually attempted and threw —
+ * the only case in which an 'auto' preference may be pinned to CPU. A machine
+ * where WebGL2 merely wasn't available yet (e.g. a launch-on-login boot) is not
+ * pinned and gets the GPU probe again next start.
  */
 export async function createLandmarker(
   preference: 'auto' | 'GPU' | 'CPU'
-): Promise<{ landmarker: PoseLandmarker; delegate: 'GPU' | 'CPU' }> {
+): Promise<{ landmarker: PoseLandmarker; delegate: 'GPU' | 'CPU'; gpuFailed: boolean }> {
   const tryGpu = preference === 'GPU' || (preference === 'auto' && webgl2Available())
+  let gpuFailed = false
   if (tryGpu) {
     try {
-      return { landmarker: await create('GPU'), delegate: 'GPU' }
+      return { landmarker: await create('GPU'), delegate: 'GPU', gpuFailed: false }
     } catch (err) {
+      gpuFailed = true
       console.warn('[landmarker] GPU delegate failed, falling back to CPU:', err)
     }
   }
-  return { landmarker: await create('CPU'), delegate: 'CPU' }
+  return { landmarker: await create('CPU'), delegate: 'CPU', gpuFailed }
 }
 
 export async function recreateAsCpu(old: PoseLandmarker | null): Promise<PoseLandmarker> {

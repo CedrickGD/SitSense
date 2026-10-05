@@ -114,20 +114,22 @@ Scale: 12 / 13 (base UI) / 15 / 18 / 24 / 34 / 48px. Base UI text is 13px `text-
 - Overlay, chosen in Settings → Camera overlay (`overlay.style`):
   - **Mesh** (default): a triangulated wireframe that fills the whole silhouette. The pose model's segmentation mask supplies the outline, and a jittered lattice rides on the shoulder line, so the mesh moves with the body instead of sliding over it. The face oval carries MediaPipe's canonical 468-point face mesh, with eyes and lips as bright contours. The silhouette outline is brighter than the interior; tracked joints get small target rings; a scanner band sweeps down the body every few seconds (off under `prefers-reduced-motion`). Drawn on a canvas at ≤30 fps, easing between detection frames so it stays fluid at 5 fps.
   - **Hologram**: the same mesh over a dimmed, desaturated feed with faint scanlines, so the wireframe glows.
-  - **Skeleton**: the original minimal markers (head + shoulder line + neck). With a fixed hue, the head, neck or shoulder markers take the active issue's stage color.
+  - **Lines** (`skeleton`, the **default** since v2): what the AI measures, from any angle. The near-side ear → shoulder → hip chain (whichever side faces the camera) is drawn as a thick, rounded polyline with joint dots, alongside a dashed **true-vertical** line through the shoulder. That line is the gravity direction projected into the image, so "ears over this line" is visible at a glance. The shoulder line and head line are drawn thin when visible. With a fixed hue, the segment an active issue lives on takes that issue's stage color.
   - **Off**: camera image only.
 - Overlay color (`overlay.color`): **Posture** follows the stage colors (sage → amber → ember → coral). A fixed hue (ice, cyan, violet, magenta, lime, gold, white or a custom pick) stays constant, and the body region of each active issue glows in that issue's stage color (head for head-forward/too-close, neck for slouching, shoulders for leaning).
 - Mesh work (segmentation output + face landmarker) runs only while a mesh preview is mounted **and** the window is visible. In the tray, the app runs pose detection only. If segmentation is unavailable, the mesh styles fall back to the skeleton.
 - Top-left chip: `● Monitoring` (sage dot, pulses gently) / `⏸ Paused · 12:41 left` (slate-cool) / `● Off` (faint).
-- Top-right chip: `on-device` — tiny shield icon, `text-faint`, always present. Trust in the pixels.
-- A faint vertical **plumb line** through the calibrated center — the alignment motif carried over from calibration. 1px, `white/10`.
+- Top-right chip: `on-device` — tiny shield icon, `text-faint`, always present. Trust in the pixels. While a cloud AI model is enabled it reads `on-device · AI: <label>`, and its tooltip says exactly when data leaves the device and what (a pose sketch or a snapshot).
+- (v1's centered plumb line is removed. The user can sit anywhere in frame; the Lines overlay's true-vertical line replaces it.)
 - Preview can be collapsed via an eye-slash button (bottom-right of frame) → replaced by a static illustration of the spine glyph; monitoring continues. Label on hover: "Hide preview (monitoring continues)".
 
 **Status column (right, ~40%).**
 1. **Spine Glyph**, 96px tall, centered, with breathing glow.
 2. **Status line** — Bricolage 34px: `Good`, or issue + stage: `Slouching` with a stage pill below it (`slight` amber / `clear` ember / `severe` coral, `rounded-full px-2 text-xs`). Sub-line in Plex Mono 13px `text-dim`: `47 min in good posture` or `for 2m 10s` (duration of current issue).
 3. **Detected now** — list of active issue rows (usually 0–2): stage-colored dot, issue name, live duration in Plex Mono. Empty state: `Nothing detected — sitting well.` in `text-faint`. Rows animate in/out with a 150ms fade.
-4. **Controls card:** "Monitoring" label + toggle (sage when on). Below it a **Pause** split button: clicking the label pauses 15 min; the `▾` opens a menu — `15 minutes · 30 minutes · 60 minutes · Until I resume`. While paused the button becomes a sage **Resume** button with countdown: `Resume — 12:41`.
+4. **What SitSense sees** (calibrated only): a compact readout from `snapshot.readout`, showing the view chip and up to three live values versus the baseline in Plex Mono, e.g. `Neck +4°`, `Trunk +2°`, `Closer 3 cm`. Values color by stage.
+5. **Ask AI** (only when a connected model is enabled): a secondary button. While pending, *Asking Gemini…*. The result card shows the score as `82/100`, the one-sentence summary, up to three tips, and the model name, with a dismiss ×. Errors are short, e.g. *Couldn't reach Gemini: bad key — check Settings → AI models.*
+6. **Controls card:** "Monitoring" label + toggle (sage when on). Below it a **Pause** split button: clicking the label pauses 15 min; the `▾` opens a menu — `15 minutes · 30 minutes · 60 minutes · Until I resume`. While paused the button becomes a sage **Resume** button with countdown: `Resume — 12:41`.
 
 **Today strip (bottom, full width, `card`).**
 - Left: big stat — Bricolage 24px `82%` + label `aligned today`; then Plex Mono pair `4h 06m good · 54m slouching`.
@@ -135,31 +137,48 @@ Scale: 12 / 13 (base UI) / 15 / 18 / 24 / 34 / 48px. Base UI text is 13px `text-
 
 ---
 
-## 4. Calibration wizard
+## 4. Posture setup (AI-coached calibration)
 
-Runs full-window (rail hidden, titlebar remains), first launch and via Calibrate icon. Three steps, progress shown as three small labeled dots top-center (`Position · Capture · Done`). Persistent `Back` (ghost) bottom-left, `Esc` cancels with confirm if mid-capture.
+v1 asked the user to "sit the way you'd like to sit all day", demanded a centered, frontal
+camera with both shoulders and ears visible, and captured on a button press. v2 inverts
+that. **SitSense judges the posture itself, coaches the user into a good one, and saves the
+baseline automatically.** It works from any camera angle.
 
-**Step 1 — Position check.** Split layout: live preview left (with plumb line + a faint dashed silhouette target of head-and-shoulders), checklist card right, updating live:
+Runs full-window. The rail stays, so the user can leave at any time; leaving cancels setup
+with nothing saved. The first launch, the Calibrate nav item and the tray's Recalibrate open
+it. Layout: the live preview on the left (Lines overlay, §3), a coach card on the right.
 
-```
-Camera check
-✓ Face visible
-✓ Shoulders visible
-◐ Ears — partially visible      ← amber, with hint below
-✓ Distance looks right
-✓ Lighting is workable
-────────────────────────────
-Hint: Turn slightly toward the camera, or raise it
-closer to eye level.
-```
+**Coach card**, top to bottom:
 
-Each row: sage check / amber half-dot / coral cross + name. A verdict line beneath: `Placement: good` (sage) / `Placement: workable — tracking may be less precise` (amber) / `Placement: not usable yet` (coral, disables Continue). Camera picker dropdown sits above the checklist for quick device switching. Primary button: **Continue** (enabled at "workable" or better).
+1. **View chip**: `Front view` / `Angled view` / `Side view · works great`, from
+   `features.view.kind`. Every view gets the same reassuring tone; none is "wrong".
+2. **Primary instruction** in Bricolage 22px: the assessment's `primary` instruction, e.g.
+   *Bring your head back until your ears sit over your shoulders.* When everything is good:
+   *That's it — hold still.* While searching: *Sit where you normally work. Your head and one
+   shoulder need to be in the picture.*
+3. **Checklist**: one row per check from `assessPosture`. Each row has a sage ✓ (good), an
+   amber ◐ with a short hint (adjust), or a faint "—" with *can't see from this angle*
+   (unknown, never blocking). Rows animate status changes over 150 ms.
+4. **Progress**:
+   * **holding**: a sage ring fills over 1.5 s, labeled `Hold it…`.
+   * **capturing**: a ring over 3 s, labeled `Capturing your baseline…`.
+   * **reviewing** (a cloud AI is connected and `useInSetup` is on): an indeterminate shimmer
+     with `Asking <connection label> to double-check…`.
+   * If the posture breaks, the ring drains amber and coaching resumes. There is no countdown
+     and no button.
+5. After 20 s of coaching, a ghost button appears: **Save this posture anyway**, with the sub
+   *SitSense couldn't confirm it — you can redo setup any time.*
 
-**Step 2 — Sit upright.** Preview centered and larger. Headline (Bricolage 24px): `Sit the way you'd like to sit all day.` Sub: `Upright but relaxed — shoulders level, screen at eye height. We'll use this as your baseline.` Primary button **Capture my baseline** starts a 3-2-1 countdown (Bricolage 48px numerals over the preview, conic sage ring), then a 5s hold with the ring filling and the copy `Hold it… capturing` in Plex Mono. If tracking quality drops mid-capture, the ring pauses amber with `Hold still — re-acquiring` and resumes. On success: the skeleton overlay flashes sage and settles.
+**Failure states** use the same card: `unstable` (*Hold still for a moment*), `lost` (*Lost
+sight of you — sit back in view*), and a cloud reviewer's rejection (its instruction is shown
+as the primary, labeled with the model name). They return to coaching automatically. The user
+never presses Retry.
 
-**Step 3 — Done.** The Spine Glyph draws itself in segment-by-segment (staggered 60ms), sage, breathing. Headline: `Baseline captured.` Sub: `SitSense now measures every frame against this posture. Recalibrate any time you move your desk or camera.` Buttons: **Start monitoring** (primary) · `Redo capture` (ghost). Footnote in `text-faint`: `Your baseline is stored only on this device.`
-
----
+**Done.** The Spine Glyph draws in, sage. Headline: **This is your good posture.** Sub: a
+readout of what was measured, e.g. *Neck 9° · Trunk upright · Shoulders level — seen from
+the side*. When a cloud model reviewed it, its one-sentence summary follows in quotes with
+the model's name. Buttons: **Start monitoring** (primary) and `Redo setup` (ghost).
+Footnote: *Only these numbers are stored, on this device.*
 
 ## 5. Settings
 
@@ -179,10 +198,14 @@ Two-pane: sticky section list left (160px: Camera · Detection · Notifications 
 Behavior card below:
 - `Wait before nudging` — slider 5–30s, value in Plex Mono: `10 s of sustained poor posture`.
 - `Quiet period between nudges` — slider 1–10 min: `3 min`.
-- `Escalate if it gets worse` — toggle, subtext `A worsening stage notifies immediately, even during the quiet period.`
+- `Escalate if it gets worse` — toggle, subtext `If it gets worse and stays worse for a few seconds, you get a new nudge — even during the quiet period (at most every 30 s).`
 - `Sound` — toggle + a soft two-note chime preview button (`Play`).
 
+**AI models.** Connect your own AI model (spec: `docs/specs/ai-providers.md` §6). It has the master toggle, the *What's sent* choice with its disclosure, *Use during setup*, and the connections list: status dot, label, model, enabled toggle, ↑/↓ priority, Test, Edit, Remove, and a `Primary` badge. The **Add connection** form is driven by presets: provider, label, masked API key (*Saved key …x2Ig*, Replace/Remove; never displayed), base URL (always for Custom/Ollama/LM Studio, under *Advanced* otherwise), and model with *Load models*. Test results show inline next to the row.
+
 **General.** Toggles: `Start with Windows` · `Start minimized to tray` · `Keep running when the window is closed` (on by default). Footer row: version, `Reset all settings` (ghost, coral text, confirm dialog).
+
+**Deliberate deviations (v2 build).** Settings is one centered column of section cards (`max-w-2xl`) rather than the two-pane layout with a sticky section list. The `Saved` fade is implemented (visual only, it shows for 1 s without motion). Closing the window always keeps SitSense running in the tray, and `Quit SitSense` sits in the footer, so there is no `Keep running when the window is closed` toggle and no `Reset all settings`. The `Sound` toggle uses the Windows notification sound rather than a custom chime; `Send test` plays it, so there is no separate `Play` preview.
 
 ---
 

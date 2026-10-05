@@ -133,3 +133,136 @@ describe('EpisodeMachine — data loss and freezing', () => {
     expect(drive(m, { sevT: 1 }, 27_000, 31_200)).toHaveLength(1)
   })
 })
+
+describe('EpisodeMachine — long gaps between steps (pause, sleep, camera restart)', () => {
+  it('an alerted episode does not carry over a 60-min gap: a still-slouched user gets a fresh initial alert', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    expect(drive(m, { sevT: 1 }, 0, 12_100)).toHaveLength(1)
+    const resume = 12_100 + 60 * 60_000
+    // first frame after the gap: no instant alert, a fresh dwell is needed
+    expect(drive(m, { sevT: 1 }, resume, resume + 11_000)).toEqual([])
+    expect(m.episodeActiveForMs(resume + 11_000)).toBeLessThan(12_000)
+    const again = drive(m, { sevT: 1 }, resume + 11_000, resume + 13_000)
+    expect(again).toEqual([expect.objectContaining({ kind: 'initial', stage: 1 })])
+    expect(again[0].durationMs).toBeLessThan(13_000)
+  })
+
+  it('a pending dwell is not completed by the first frame after a gap, and its duration excludes the gap', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    drive(m, { sevT: 3 }, 0, 11_600)
+    const resume = 11_600 + 60 * 60_000
+    expect(drive(m, { sevT: 3 }, resume, resume + 1_000)).toEqual([])
+    const fired = drive(m, { sevT: 3 }, resume + 1_000, resume + 12_500)
+    expect(fired).toHaveLength(1)
+    expect(fired[0].durationMs).toBeLessThanOrEqual(12_500)
+  })
+
+  it('a long gap also ends the quiet period (like a long absence)', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    drive(m, { sevT: 1 }, 0, 12_100)
+    drive(m, { sevT: 0, sevR: 0 }, 12_100, 17_200) // cooldown armed until ≈137 s
+    expect(m.phase).toBe('cooldown')
+    const resume = 17_200 + 40_000
+    drive(m, { sevT: 0, sevR: 0 }, resume, resume + 100)
+    expect(m.phase).toBe('idle')
+    expect(drive(m, { sevT: 1 }, resume + 100, resume + 12_600)).toHaveLength(1)
+  })
+
+  it('gaps up to the full-reset limit keep the existing (capped Δt) behaviour', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    drive(m, { sevT: 1 }, 0, 8_000)
+    // 20 s without steps: still the same pending episode, the gap adds only DT_CAP
+    expect(drive(m, { sevT: 1 }, 28_000, 31_500)).toEqual([])
+    expect(drive(m, { sevT: 1 }, 31_500, 32_500)).toHaveLength(1)
+  })
+})
+
+describe('EpisodeMachine — escalation during the quiet period', () => {
+  /** initial stage-1 alert at ≈12 s, recovered for 5 s → cooldown until ≈137 s */
+  function quiet(cfg = CFG): EpisodeMachine {
+    const m = new EpisodeMachine('sink', cfg)
+    expect(drive(m, { sevT: 1 }, 0, 12_100)).toHaveLength(1)
+    drive(m, { sevT: 0, sevR: 0 }, 12_100, 17_200)
+    expect(m.phase).toBe('cooldown')
+    return m
+  }
+
+  it('a worse stage alerts as an escalation inside the quiet period (dwell met, ESC_MIN_GAP after the last alert)', () => {
+    const m = quiet()
+    // slumps straight to stage 3: the dwell completes at ≈29.2 s, the 30 s gap to the
+    // initial alert (12.0 s) at 42 s — both long before the cooldown ends (≈137 s)
+    expect(drive(m, { sevT: 3 }, 17_200, 41_950)).toEqual([])
+    const esc = drive(m, { sevT: 3 }, 41_950, 42_500)
+    expect(esc).toEqual([expect.objectContaining({ kind: 'escalation', stage: 3 })])
+    expect(m.phase).toBe('alerted')
+    // and nothing more for that episode at the same stage
+    expect(drive(m, { sevT: 3 }, 42_500, 200_000)).toEqual([])
+  })
+
+  it('the same (or a lower) stage stays quiet until the cooldown ends', () => {
+    const m = quiet()
+    expect(drive(m, { sevT: 1 }, 17_200, 137_000)).toEqual([])
+  })
+
+  it('the worse stage must hold for ESC_DWELL (brief spikes do not get through)', () => {
+    const m = quiet()
+    drive(m, { sevT: 1 }, 17_200, 30_000) // dwell met at stage 1 (quiet)
+    const alerts: PostureAlert[] = []
+    for (let k = 0; k < 10; k++) {
+      const t = 30_000 + k * 6_000
+      alerts.push(...drive(m, { sevT: 3 }, t, t + 3_000)) // 3 s at stage 3 …
+      alerts.push(...drive(m, { sevT: 1 }, t + 3_000, t + 6_000)) // … then back to 1
+    }
+    expect(alerts).toEqual([])
+    expect(drive(m, { sevT: 3 }, 90_000, 94_200)).toEqual([expect.objectContaining({ kind: 'escalation', stage: 3 })])
+  })
+
+  it('is rate-limited to ESC_MIN_GAP after the previous alert', () => {
+    const m = new EpisodeMachine('sink', { ...CFG, dwellS: 2 })
+    expect(drive(m, { sevT: 1 }, 0, 2_100)).toHaveLength(1)
+    drive(m, { sevT: 0, sevR: 0 }, 2_100, 7_200) // cooldown armed at ≈7.1 s
+    // stage 2 right away: dwell 2 s and ESC_DWELL 4 s are met by ≈11.3 s, the gap only at ≈32 s
+    expect(drive(m, { sevT: 2 }, 7_200, 32_000)).toEqual([])
+    expect(drive(m, { sevT: 2 }, 32_000, 32_500)).toEqual([expect.objectContaining({ kind: 'escalation', stage: 2 })])
+  })
+
+  it('never breaks the quiet period when escalation is disabled', () => {
+    const m = quiet({ ...CFG, escalation: false })
+    expect(drive(m, { sevT: 3 }, 17_200, 137_000)).toEqual([])
+    expect(drive(m, { sevT: 3 }, 137_000, 138_000)).toEqual([expect.objectContaining({ kind: 'initial', stage: 3 })])
+  })
+
+  it('after a quiet-period escalation recovers, only a stage above it gets through', () => {
+    const m = quiet()
+    expect(drive(m, { sevT: 2 }, 17_200, 42_500)).toHaveLength(1) // escalation to 2 at 42 s
+    drive(m, { sevT: 0, sevR: 0 }, 42_500, 47_600) // recovered: quiet period re-armed to ≈167.5 s
+    expect(drive(m, { sevT: 2 }, 47_600, 160_000)).toEqual([])
+    expect(drive(m, { sevT: 3 }, 160_000, 165_000)).toEqual([expect.objectContaining({ kind: 'escalation', stage: 3 })])
+  })
+})
+
+describe('EpisodeMachine — data-loss reset of an alerted episode', () => {
+  it('starts the quiet period: no new initial alert ~23 s after the last one', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    expect(drive(m, { sevT: 1 }, 0, 12_100)).toHaveLength(1)
+    drive(m, { sevT: 1, data: false }, 12_200, 23_000) // >10 s unavailable → silent reset
+    expect(m.phase).toBe('cooldown')
+    // still slouched afterwards: quiet until the cooldown (from ≈22.3 s) ends
+    expect(drive(m, { sevT: 1 }, 23_000, 142_000)).toEqual([])
+    expect(drive(m, { sevT: 1 }, 142_000, 143_000)).toEqual([expect.objectContaining({ kind: 'initial' })])
+  })
+
+  it('a pending (never alerted) episode lost to data loss arms no cooldown', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    drive(m, { sevT: 1 }, 0, 8_000)
+    drive(m, { sevT: 1, data: false }, 8_000, 19_000)
+    expect(m.phase).toBe('idle')
+  })
+
+  it('a worse stage after the data-loss reset still escalates through the quiet period', () => {
+    const m = new EpisodeMachine('sink', CFG)
+    drive(m, { sevT: 1 }, 0, 12_100)
+    drive(m, { sevT: 1, data: false }, 12_200, 23_000)
+    expect(drive(m, { sevT: 3 }, 23_000, 43_000)).toEqual([expect.objectContaining({ kind: 'escalation', stage: 3 })])
+  })
+})

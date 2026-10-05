@@ -6,7 +6,7 @@ import {
   type TrayState
 } from '../shared/posture'
 import { stageLabel } from './notifications'
-import { getPauseState } from './pause'
+import { getPauseState, onPauseChanged } from './pause'
 import { resourcesDir } from './resources'
 
 export interface TrayCallbacks {
@@ -16,6 +16,10 @@ export interface TrayCallbacks {
   onRecalibrate: () => void
   onSettings: () => void
   onQuit: () => void
+  /** version of a downloaded update waiting for a restart, else null (src/main/updater.ts) */
+  updateReady?: () => string | null
+  /** "Restart to update" */
+  onInstallUpdate?: () => void
 }
 
 // keep the Tray referenced for the process lifetime — GC'd trays vanish
@@ -27,6 +31,7 @@ let lastUpdateAt = 0
 let currentState: TrayState = 'off'
 let staleTimer: NodeJS.Timeout | null = null
 let countdownTimer: NodeJS.Timeout | null = null
+let unsubscribePause: (() => void) | null = null
 
 const ICON_FILES: Record<TrayState, string> = {
   good: 'tray-good.ico',
@@ -51,14 +56,32 @@ export function createTray(cb: TrayCallbacks): void {
       refreshTray()
     }
   }, 5_000)
+  // a snapshot from before a pause must not be shown after resuming: until the
+  // renderer reports again, the tray says "not detecting" instead of old posture
+  unsubscribePause?.()
+  unsubscribePause = onPauseChanged(() => {
+    lastSnapshot = null
+    lastUpdateAt = 0
+    refreshTray()
+  })
   refreshTray()
 }
 
 export function destroyTray(): void {
   if (staleTimer) clearInterval(staleTimer)
   if (countdownTimer) clearInterval(countdownTimer)
+  staleTimer = null
+  countdownTimer = null
+  unsubscribePause?.()
+  unsubscribePause = null
   tray?.destroy()
   tray = null
+  // a recreated Tray starts with no icon/menu — force a full refresh next time
+  currentState = 'off'
+  lastStatusText = ''
+  lastUpdateReady = null
+  lastSnapshot = null
+  lastUpdateAt = 0
 }
 
 export function trayPostureUpdate(snapshot: PostureSnapshot): void {
@@ -68,6 +91,7 @@ export function trayPostureUpdate(snapshot: PostureSnapshot): void {
 }
 
 let lastStatusText = ''
+let lastUpdateReady: string | null = null
 
 export function refreshTray(): void {
   if (!tray) return
@@ -80,9 +104,11 @@ export function refreshTray(): void {
   // rebuild the (immutable) menu only when its content actually changed —
   // replacing it on every posture update can close an open menu mid-click
   const status = statusText()
-  if (status !== lastStatusText) {
+  const update = callbacks?.updateReady?.() ?? null
+  if (status !== lastStatusText || update !== lastUpdateReady) {
     lastStatusText = status
-    tray.setToolTip(`SitSense — ${status}`)
+    lastUpdateReady = update
+    tray.setToolTip(`SitSense — ${status}${update ? ` · update ${update} ready` : ''}`)
     rebuildMenu()
   }
   syncCountdownTimer()
@@ -136,10 +162,16 @@ function rebuildMenu(): void {
         ]
       }
 
+  const update = callbacks?.updateReady?.() ?? null
+  const updateItems: Electron.MenuItemConstructorOptions[] = update
+    ? [{ label: 'Restart to update', toolTip: `Installs SitSense ${update}`, click: () => callbacks?.onInstallUpdate?.() }]
+    : []
+
   const menu = Menu.buildFromTemplate([
     { label: statusText(), enabled: false },
     { type: 'separator' },
     { label: 'Open SitSense', click: () => callbacks?.onOpen() },
+    ...updateItems,
     pauseItem,
     { label: 'Recalibrate', click: () => callbacks?.onRecalibrate() },
     { label: 'Settings', click: () => callbacks?.onSettings() },
