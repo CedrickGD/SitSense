@@ -13,7 +13,7 @@ import AboutPage from './settings/AboutPage'
 import CameraPage from './settings/CameraPage'
 import DetectionPage from './settings/DetectionPage'
 import GeneralPage from './settings/GeneralPage'
-import { CATEGORY_META, CATEGORY_NAV_WIDTH, categoryIntro, categoryNavMode } from './settings/meta'
+import { CATEGORY_META, CATEGORY_NAV_WIDTH, categoryIntro, categoryNavMode, type CategoryNavMode } from './settings/meta'
 import NotificationsPage from './settings/NotificationsPage'
 import { CommitProvider } from './settings/parts'
 import PrivacyPage from './settings/PrivacyPage'
@@ -153,19 +153,20 @@ export default function SettingsScreen(): JSX.Element {
   const setCategory = useAppStore((s) => s.setSettingsCategory)
   const version = useAppStore((s) => s.appVersion)
   const wrapRef = useRef<HTMLDivElement>(null)
-  const [available, setAvailable] = useState<number | null>(null)
+  // the mode is kept as state so the next measurement can apply hysteresis against it
+  // (categoryNavMode's `prev`): a width that only moves by a scrollbar can't flip it
+  const [mode, setMode] = useState<CategoryNavMode>('chips')
   useLayoutEffect(() => {
     const el = wrapRef.current
     if (!el) return
-    setAvailable(el.getBoundingClientRect().width)
+    setMode(categoryNavMode(el.getBoundingClientRect().width))
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width
-      if (w !== undefined) setAvailable(w)
+      if (w !== undefined) setMode((prev) => categoryNavMode(w, prev))
     })
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
-  const mode = categoryNavMode(available ?? 0)
   const listWidth = CATEGORY_NAV_WIDTH[mode]
   const meta = CATEGORY_META[category]
   const headingId = 'settings-category-title'

@@ -5,15 +5,18 @@ import { useState, type JSX } from 'react'
 import { useAppStore } from '@renderer/state/store'
 import { detectionController } from '@renderer/detection/controller'
 import { useMonitoring } from '@renderer/lib/hooks'
-import { useFallbackCameraNote, usableConnections } from '@renderer/components/CameraFeed'
+import { useFallbackCameraNote } from '@renderer/components/CameraFeed'
+import { usableConnections } from '@renderer/ai/helpers'
 import { Banner, Button } from '@renderer/components/primitives'
-import { pickBanner } from './liveModel'
+import { dismissedForBaseline, pickBanner } from './liveModel'
 
 /** the sentence keeps ~20rem before the actions wrap under it (narrow windows) */
 const BANNER_WRAP = '[&>span:nth-child(2)]:basis-[20rem]'
 
-// "once per app start until dismissed": module state outlives the Live screen's remounts
-const dismissed = { recalibrate: false, unverified: false }
+// "once per app start until dismissed": module state outlives the Live screen's remounts.
+// The view-changed hint is dismissed per baseline (its capturedAt): a new setup re-arms it,
+// so a later drift is never hidden by a Dismiss from before.
+const dismissed: { recalibrateFor: number | null; unverified: boolean } = { recalibrateFor: null, unverified: false }
 
 export default function LiveBanners(): JSX.Element | null {
   const m = useMonitoring()
@@ -23,17 +26,18 @@ export default function LiveBanners(): JSX.Element | null {
   const openSettings = useAppStore((s) => s.openSettings)
   const fallbackNote = useFallbackCameraNote()
   const [, rerender] = useState(0)
-  const dismiss = (key: keyof typeof dismissed): void => {
-    dismissed[key] = true
+  const baseline = settings?.calibration ?? null
+  const dismiss = (key: 'recalibrate' | 'unverified'): void => {
+    if (key === 'recalibrate') dismissed.recalibrateFor = baseline?.capturedAt ?? null
+    else dismissed.unverified = true
     rerender((n) => n + 1)
   }
 
-  const baseline = settings?.calibration ?? null
   const which = pickBanner({
     mismatch: m.calibrated && m.mismatch,
     // only meaningful while posture is really being judged
     recalibrationSuggested: m.watching && recalibrationSuggested,
-    recalibrateDismissed: dismissed.recalibrate,
+    recalibrateDismissed: dismissedForBaseline(dismissed.recalibrateFor, baseline?.capturedAt),
     unverified: !!baseline && !baseline.verified,
     unverifiedDismissed: dismissed.unverified,
     usingFallback: m.live && fallbackNote !== null

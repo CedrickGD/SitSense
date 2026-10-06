@@ -12,17 +12,29 @@ import {
   type Stage,
   type StatMinute
 } from '@shared/posture'
-import type { SittingState } from '@shared/ipc'
+import { BREAK_AWAY_MINUTES, type SittingState } from '@shared/ipc'
 import type { Landmark } from '@renderer/posture/types'
 import { isSeen } from '@renderer/detection/pose-geometry'
 import { STAGES } from '@renderer/posture/constants'
 import { fmtMinutes, plural } from '@renderer/lib/format'
+import { isSuspended } from '@renderer/lib/score'
 
 const round = (v: number): number => Math.round(Math.abs(v))
 
 // ───────────────────────────── status (Posture card, Zone A) ─────────────────────────────
 
-export type StatusKind = 'good' | 'issue' | 'paused' | 'away' | 'setup' | 'camera' | 'starting' | 'mismatch' | 'restarting' | 'unseen'
+export type StatusKind =
+  | 'good'
+  | 'issue'
+  | 'paused'
+  | 'away'
+  | 'setup'
+  | 'camera'
+  | 'starting'
+  | 'mismatch'
+  | 'restarting'
+  | 'unseen'
+  | 'changed'
 
 export interface StatusInput {
   paused: boolean
@@ -31,7 +43,8 @@ export interface StatusInput {
   detectorError: 'model' | 'inference' | null
   calibrated: boolean
   mismatch: boolean
-  snapshot: Pick<PostureSnapshot, 'presence' | 'issues' | 'readout'> | null
+  /** `suspended`: every detector paused (view far off the setup distance; optional engine field) */
+  snapshot: (Pick<PostureSnapshot, 'presence' | 'issues' | 'readout'> & { suspended?: boolean }) | null
 }
 
 export interface StatusView {
@@ -66,6 +79,9 @@ export function statusView(i: StatusInput): StatusView {
   if (i.detectorError === 'inference') return v('restarting', 'Restarting…')
   if (!i.running || !i.snapshot) return v('starting', 'Starting…')
   if (i.snapshot.presence === 'away') return v('away', 'Away')
+  // the engine forces every stage to 0 while its detectors are suspended: nothing is
+  // judged, so this must never fall through to "Good"
+  if (isSuspended(i.snapshot)) return v('changed', 'View changed')
   const worst = worstIssue(i.snapshot.issues)
   if (worst) return { kind: 'issue', word: ISSUE_LABELS[worst.issue], worst }
   // in view, but nothing measurable right now (every readout value stale or missing):
@@ -88,7 +104,7 @@ export function fmtLiveDuration(ms: number | null | undefined): string {
 }
 
 /** Why the gauges aren't shown (Zone B placeholder), or null when they are. */
-export type GaugeGate = 'paused' | 'camera' | 'setup' | 'mismatch' | 'waiting' | 'restarting' | 'starting' | null
+export type GaugeGate = 'paused' | 'camera' | 'setup' | 'mismatch' | 'changed' | 'waiting' | 'restarting' | 'starting' | null
 
 export function gaugeGate(kind: StatusKind): GaugeGate {
   switch (kind) {
@@ -103,6 +119,8 @@ export function gaugeGate(kind: StatusKind): GaugeGate {
       return 'setup'
     case 'mismatch':
       return 'mismatch'
+    case 'changed':
+      return 'changed'
     case 'restarting':
       return 'restarting'
     case 'away':
@@ -118,6 +136,7 @@ export const GAUGE_GATE_COPY: Record<Exclude<GaugeGate, null>, string> = {
   camera: 'The camera is off, so nothing is measured right now.',
   setup: 'Set up your posture to see live measurements.',
   mismatch: 'This camera is new — set up again to see live measurements.',
+  changed: 'Your view changed a lot since setup — redo setup to measure again.',
   waiting: 'Waiting for you to sit in view.',
   restarting: 'Detection is restarting — back in a moment.',
   starting: 'Starting the camera…'
@@ -187,6 +206,9 @@ export function gaugeModels(
   const trunk = fin(r?.trunkFwd) ? r!.trunkFwd! : null
   const drop = fin(r?.drop) ? r!.drop! : null
   const lat = fin(r?.lateral) ? r!.lateral! : null
+  // the side-lean value falls back to the neck tilt when the hips aren't usable; its
+  // stages differ from the trunk's, so the zones must follow the source (optional engine field)
+  const latFromNeck = (r as (PostureReadout & { lateralFrom?: 'trunk' | 'neck' }) | null)?.lateralFrom === 'neck'
   const fwd = fin(r?.forward) ? r!.forward! : null
 
   const back: GaugeModel =
@@ -234,8 +256,9 @@ export function gaugeModels(
       // the track reads like the mirrored preview: your left is on the left
       value: lat === null ? null : -lat,
       valueText: lat === null ? '' : leanText(lat),
-      range: [-20, 20],
-      ticks: div(STAGES.lean.trunkLat, sig('lean')),
+      // ±25 for the neck so its 22° severe tick stays on the track
+      range: latFromNeck ? [-25, 25] : [-20, 20],
+      ticks: div(latFromNeck ? STAGES.lean.neckLat : STAGES.lean.trunkLat, sig('lean')),
       twoSided: true,
       unavailableReason: "SitSense can't see enough of your shoulders from this angle."
     },
@@ -381,8 +404,8 @@ export interface SittingView {
   offerTurnOn: boolean
 }
 
-/** Minutes a break needs (break-tracker.ts: 3 min away ends a stretch). */
-export const BREAK_LENGTH_MIN = 3
+/** Minutes a break needs (shared BREAK_AWAY_MINUTES; break-tracker.ts ends a stretch after it). */
+export const BREAK_LENGTH_MIN = BREAK_AWAY_MINUTES
 
 export function sittingView(
   s: SittingState | null,
@@ -422,6 +445,14 @@ export function sittingView(
 // ───────────────────────────── banners (§3.7) ─────────────────────────────
 
 export type LiveBanner = 'mismatch' | 'recalibrate' | 'unverified' | 'fallback' | null
+
+/**
+ * Whether a per-baseline dismissal still applies: only to the baseline it was made for
+ * (matched by capturedAt), so a new setup re-arms the banner.
+ */
+export function dismissedForBaseline(dismissedFor: number | null, capturedAt: number | null | undefined): boolean {
+  return dismissedFor !== null && typeof capturedAt === 'number' && dismissedFor === capturedAt
+}
 
 /** At most one banner, in priority order. */
 export function pickBanner(i: {

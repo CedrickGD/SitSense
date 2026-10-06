@@ -32,7 +32,8 @@ import {
   LYING_TRUNK_MAX,
   SIDE_VIEW_YAW,
   SIDE_VIEW_YAW_MAX,
-  VERIFY_HEAD_ON_TRUNK_MIN
+  VERIFY_HEAD_ON_TRUNK_MIN,
+  VERIFY_HEAD_ON_TRUNK_PER_DEG
 } from './constants'
 import type { PostureFeatures, Side } from './types'
 
@@ -143,14 +144,28 @@ export const INSTRUCTIONS = {
   headTilt: (side: Side): string => `Straighten your head — it's tilted toward your ${side}.`,
   gazeDown: 'Lift your gaze a little — if your screen sits low, raise it.',
   gazeUp: 'Lower your chin slightly.',
-  /** the hips are outside the picture: essential checks need them */
+  /** the hips are outside the picture, and with them in view this camera could check the back */
   showHips: 'Tilt the camera down a little so your hips are in the picture — SitSense needs them to check your back.',
+  /**
+   * the hips are outside the picture, but even with them this view could not check the back (no
+   * thigh gravity, not a near profile): they only make the head position checkable
+   */
+  showHipsForHead:
+    'Tilt the camera down a little so your hips are in the picture — SitSense needs them to check your head position.',
   /** the hips are in the picture but hidden (a desk) or not usable */
   hipsHidden: "Sit tall against your backrest — your hips are hidden, so SitSense can't check your back from this camera.",
   /** the trunk reads upright, but the head on the trunk says it leans in (or the eyes look up) */
   sitBackLookAhead: 'Sit back against your backrest and look at the middle of your screen.',
-  /** the trunk is in view, but its lean cannot be judged from this direction */
-  backFromFront: "Sit tall against your backrest — SitSense can't judge your back angle from straight in front."
+  /** the trunk's lean cannot be judged from this direction: a frontal view */
+  backFromFront: "Sit tall against your backrest — SitSense can't judge your back angle from straight in front.",
+  /** …an angled (or not-quite-profile) view: neither frontal nor near enough to the side */
+  backFromAngle: "Sit tall against your backrest — SitSense can't judge your back angle from this camera angle.",
+  /**
+   * the hip line contradicts a level camera (rolled, or hips that are not real): the camera's
+   * roll leaks into the back and neck angles, so neither is confirmed
+   */
+  levelCamera:
+    "Sit tall against your backrest and straighten the camera — it looks tilted, so SitSense can't confirm your back angle."
 } as const
 
 const R_WEAK_TRUNK = 'camera tilt unknown from this view — trunk lean cannot be judged absolutely'
@@ -160,6 +175,9 @@ const R_DISAGREE = 'the head tips back on the trunk as when leaning in — the b
 const R_HEAD_NO_REF = 'camera tilt unknown and the trunk not in view — the neck angle cannot be checked'
 const R_ROLL = 'camera roll unknown without the hips in view'
 const R_LEVEL = 'the hips do not confirm a level camera — the absolute horizontal cannot be judged'
+const R_LEVEL_SAGITTAL = 'the hips do not confirm a level camera — its roll may leak into this angle'
+const R_MARGIN = 'within the allowance for an imprecise gravity reference, but past the ergonomic limit — not confirmed'
+const R_LYING_DISAGREE = 'the head tips far forward on the trunk as when lying back — the back angle cannot be confirmed'
 
 function check(
   id: CheckId,
@@ -196,6 +214,12 @@ const unknown = (id: CheckId, reason: string, viewInstruction?: string): Posture
  * limits × k (1.0, or 1.4 with camera gravity). The lower limits (reclined −25°, chin
  * up −15°) are fixed: k models how far an unknown tilt can push a reading forward, not
  * a licence to recline further. `slack` (hold hysteresis) widens every limit.
+ *
+ * The widened sagittal limits only decide what is COACHED: an absolute trunk or neck reading
+ * between the ergonomic limit and its widened one is 'unknown' (not confirmed) — k models the
+ * reference's error, which can hide a slump as easily as it can fake one. Only a reading within
+ * the plain limit (× slack) confirms a posture, and only while the hip line agrees with a level
+ * camera (`levelUnconfirmed` leaves both absolute sagittal checks unconfirmed).
  */
 export interface AssessOptions {
   /**
@@ -211,7 +235,17 @@ export interface AssessOptions {
    * rather than coached on a possibly rolled horizontal. Default false.
    */
   levelUnconfirmed?: boolean
+  /**
+   * The optical yaw (deg) from which a view counts as near-profile (default SIDE_VIEW_YAW). The
+   * setup session lowers it by SIDE_VIEW_YAW_HYST while holding/capturing — and for the final
+   * exam of an unforced capture — so a yaw hovering at the limit cannot flip the verdict.
+   */
+  sideYawMin?: number
 }
+
+/** Whether an optical yaw (deg) is a near-profile view (see AssessOptions.sideYawMin). */
+export const isSideYaw = (yaw: number, sideYawMin: number = SIDE_VIEW_YAW): boolean =>
+  yaw >= sideYawMin && yaw <= SIDE_VIEW_YAW_MAX
 
 export function assessPosture(
   f: PostureFeatures | null,
@@ -233,7 +267,7 @@ export function assessPosture(
   // close to 90°: from behind the profile the leak grows as |cos yaw| again. Judged on the
   // optical-axis yaw, which a lean of the user does not shift
   const yaw = f.view.opticalYawDeg
-  const side = yaw >= SIDE_VIEW_YAW && yaw <= SIDE_VIEW_YAW_MAX
+  const side = isSideYaw(yaw, opts.sideYawMin)
   // gravity-referenced sagittal angles can be trusted (thigh gravity or a near-profile view)
   const absolute = strong || side
   const slack = opts.slack ?? 1
@@ -256,7 +290,23 @@ export function assessPosture(
   const unverified: CheckId[] = []
   // without a usable hip: in the picture but hidden (a desk) or judged hallucinated, or outside it
   const hipsHidden = (f.vis.hipsInFrame ?? 0) > 0
-  const noHipsInstruction = hipsHidden ? INSTRUCTIONS.hipsHidden : INSTRUCTIONS.showHips
+  // with the hips in view, could this camera check the back? Only with thigh gravity (knees in
+  // view, or already in use) or a near-profile view; elsewhere showing them only makes the head
+  // checkable (on the trunk), and "needs them to check your back" would send the user to move
+  // the camera for nothing
+  const hipsWouldVerifyBack = strong || side || f.vis.knees > 0
+  // the back's lean cannot be judged from this direction: say which (the view, not the posture)
+  const noBackInstruction = f.view.kind === 'front' ? INSTRUCTIONS.backFromFront : INSTRUCTIONS.backFromAngle
+  const trunkNoHipsInstruction = hipsHidden
+    ? INSTRUCTIONS.hipsHidden
+    : hipsWouldVerifyBack
+      ? INSTRUCTIONS.showHips
+      : noBackInstruction
+  const headNoHipsInstruction = hipsHidden
+    ? INSTRUCTIONS.hipsHidden
+    : hipsWouldVerifyBack
+      ? INSTRUCTIONS.showHips
+      : INSTRUCTIONS.showHipsForHead
 
   // ---- trunkUpright
   // lying in the chair (gravity-free): the eyes stay on the screen, so the head tips far
@@ -278,10 +328,29 @@ export function assessPosture(
       checks.push(check('trunkUpright', 'adjust', trunk, lying ? INSTRUCTIONS.lying : INSTRUCTIONS.trunkBack, 'back', undefined, 'absolute'))
     } else if (lyingSignature) {
       checks.push(check('trunkUpright', 'adjust', gazeRel, INSTRUCTIONS.lying, 'back', undefined, 'relative'))
-    } else if (gazeRel !== null && gazeRel < VERIFY_HEAD_ON_TRUNK_MIN - 10 * (slack - 1)) {
+    } else if (gazeRel !== null && gazeRel < VERIFY_HEAD_ON_TRUNK_MIN + VERIFY_HEAD_ON_TRUNK_PER_DEG * Math.max(0, trunk) - 10 * (slack - 1)) {
       // the absolute reading looks fine, but the head tips back on the trunk as when leaning
-      // in toward the screen: the two disagree, so the back angle is not confirmed
+      // in toward the screen: the two disagree, so the back angle is not confirmed. The closer
+      // the reading is to the forward limit, the more corroboration it needs (a slump on a seat
+      // whose knees point down reads up to ~10° too upright, with the head tipped back on it)
       checks.push(unknown('trunkUpright', R_DISAGREE, INSTRUCTIONS.sitBackLookAhead))
+      unverified.push('trunkUpright')
+    } else if (opts.levelUnconfirmed) {
+      // the hip line contradicts a level camera: its roll leaks into the sagittal angles of a
+      // turned body (the gravity estimate keeps the camera level), so the reading is not confirmed
+      checks.push(unknown('trunkUpright', R_LEVEL_SAGITTAL, INSTRUCTIONS.levelCamera))
+      unverified.push('trunkUpright')
+    } else if (gazeRel !== null && neckRel !== null && gazeRel > LYING_HEAD_ON_TRUNK * slack && neckRel > LYING_NECK_REL_MIN * slack) {
+      // the mirror of the lean-in disagreement: the absolute reading looks fine, but the head
+      // tips as far forward on the trunk as when lying back — not confirmed
+      checks.push(unknown('trunkUpright', R_LYING_DISAGREE, INSTRUCTIONS.sitBackLookAhead))
+      unverified.push('trunkUpright')
+    } else if (trunk > ASSESS.trunkFwdMax * slack) {
+      // past the ergonomic limit, within the allowance for the gravity reference's error (a
+      // thigh slope, a small camera roll in a profile view): not coached, not confirmed either.
+      // The allowance keeps a good posture on a sloped seat from being coached wrongly; it never
+      // confirms one
+      checks.push(unknown('trunkUpright', R_MARGIN, INSTRUCTIONS.sitBackLookAhead))
       unverified.push('trunkUpright')
     } else {
       checks.push(check('trunkUpright', 'good', trunk, null, undefined, undefined, 'absolute'))
@@ -293,10 +362,10 @@ export function assessPosture(
     // the head tips back on the trunk to see the screen: the trunk leans toward it
     checks.push(check('trunkUpright', 'adjust', gazeRel, INSTRUCTIONS.trunkForward, 'forward', undefined, 'relative'))
   } else if (trunk === null) {
-    checks.push(unknown('trunkUpright', hipsHidden ? R_HIPS_HIDDEN : R_NO_HIPS, noHipsInstruction))
+    checks.push(unknown('trunkUpright', hipsHidden ? R_HIPS_HIDDEN : R_NO_HIPS, trunkNoHipsInstruction))
     unverified.push('trunkUpright')
   } else {
-    checks.push(unknown('trunkUpright', R_WEAK_TRUNK, INSTRUCTIONS.backFromFront))
+    checks.push(unknown('trunkUpright', R_WEAK_TRUNK, noBackInstruction))
     unverified.push('trunkUpright')
   }
 
@@ -311,6 +380,14 @@ export function assessPosture(
     if (absFail || relFail) {
       const v = absFail ? f.neckFwd : (neckRel as number)
       checks.push(check('headOverShoulders', 'adjust', v, INSTRUCTIONS.headForward, 'forward', undefined, absFail ? 'absolute' : 'relative'))
+    } else if (absolute && opts.levelUnconfirmed) {
+      // (a camera roll leaks into the neck angle as into the trunk's)
+      checks.push(unknown('headOverShoulders', R_LEVEL_SAGITTAL, INSTRUCTIONS.levelCamera))
+      unverified.push('headOverShoulders')
+    } else if (absolute && f.neckFwd > ASSESS.neckFwdMax * slack) {
+      // past the ergonomic limit, within the gravity reference's allowance: not confirmed
+      checks.push(unknown('headOverShoulders', R_MARGIN, INSTRUCTIONS.headForward))
+      unverified.push('headOverShoulders')
     } else if (absolute) {
       checks.push(check('headOverShoulders', 'good', f.neckFwd, null, undefined, undefined, 'absolute'))
     } else if (neckRel !== null) {
@@ -320,7 +397,7 @@ export function assessPosture(
       // called out (it assumes a roughly level camera); anything less cannot be verified
       checks.push(check('headOverShoulders', 'adjust', f.neckFwd, INSTRUCTIONS.headForward, 'forward', undefined, 'estimate'))
     } else {
-      checks.push(unknown('headOverShoulders', R_HEAD_NO_REF, noHipsInstruction))
+      checks.push(unknown('headOverShoulders', R_HEAD_NO_REF, headNoHipsInstruction))
       unverified.push('headOverShoulders')
     }
   }

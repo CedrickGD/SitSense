@@ -40,7 +40,9 @@ vi.mock('../ai', () => ({
     testConnection: h.rec('ai.test', {}),
     listModels: h.rec('ai.list', {}),
     reviewPosture: h.rec('ai.review', {}),
-    chat: h.rec('ai.chat', {})
+    chat: h.rec('ai.chat', {}),
+    cancelChat: h.rec('ai.cancelChat'),
+    cancelReview: h.rec('ai.cancelReview')
   })
 }))
 vi.mock('../autostart', () => ({ applyAutostart: h.rec('autostart') }))
@@ -180,6 +182,8 @@ describe('registerIpc sender validation', () => {
       IPC.aiListModels,
       IPC.aiReviewPosture,
       IPC.aiChat,
+      IPC.aiChatCancel,
+      IPC.aiCancelReview,
       IPC.statsGetRange,
       IPC.breakSnooze,
       IPC.updateGetState,

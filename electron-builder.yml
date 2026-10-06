@@ -31,8 +31,9 @@ nsis:
   createStartMenuShortcut: true # REQUIRED for reliable toasts (AUMID shortcut)
   createDesktopShortcut: true
   runAfterFinish: true
-  # customUnInstall: deletes the HKCU Run autostart value (AUTOSTART_NAME in
-  # src/main/autostart.ts) on a real uninstall, but not during an update
+  # customUnInstall: on a real uninstall (not during an update) deletes the HKCU
+  # Run autostart value (AUTOSTART_NAME in src/main/autostart.ts) and the updater
+  # cache %LOCALAPPDATA%\sitsense-updater (cached installer + pending downloads)
   include: build/installer.nsh
 portable:
   artifactName: SitSense-portable-${version}.exe

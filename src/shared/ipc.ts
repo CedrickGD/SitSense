@@ -25,6 +25,8 @@ export const IPC = {
   aiListModels: 'ai:list-models',
   aiReviewPosture: 'ai:review-posture',
   aiChat: 'ai:chat',
+  aiChatCancel: 'ai:chat-cancel',
+  aiCancelReview: 'ai:cancel-review',
   statsGetRange: 'stats:get-range',
   breakSnooze: 'breaks:snooze',
   updateGetState: 'update:get-state',
@@ -44,6 +46,7 @@ export const IPC = {
   navigate: 'control:navigate',
   systemResumed: 'system:resumed',
   windowVisibility: 'window:visibility',
+  windowClosedToTray: 'window:closed-to-tray',
   sittingChanged: 'breaks:sitting',
   updateState: 'update:state'
 } as const
@@ -65,6 +68,12 @@ export interface AppStatus {
   /** continuous sitting / break reminder state */
   sitting: SittingState
 }
+
+/**
+ * Minutes away from the desk (or paused / not detecting) that end a sitting stretch and
+ * count as a break (main/break-tracker.ts). The one value every screen quotes.
+ */
+export const BREAK_AWAY_MINUTES = 3
 
 /**
  * Continuous sitting time, tracked in main from posture snapshots. A break is
@@ -124,6 +133,10 @@ export interface SitSenseApi {
   aiReviewPosture(req: AiReviewRequest): Promise<AiPostureReview>
   /** Coach chat: one answer to the conversation (docs/specs/ai-providers.md §7). Never rejects. */
   aiChat(req: AiChatRequest): Promise<AiChatReply>
+  /** Stop / Clear chat: abort the coach answer main is working on (its aiChat resolves "interrupted"). */
+  aiChatCancel(): Promise<void>
+  /** Abandon the posture review sent with this `requestId` and free main's review slot. Never rejects. */
+  aiCancelReview(requestId: string): Promise<void>
 
   /** per-day history for the last `days` local days (1..90, today included), oldest first */
   getStatsRange(days: number): Promise<StatsRange>
@@ -150,6 +163,8 @@ export interface SitSenseApi {
   onNavigate(cb: (route: AppRoute) => void): () => void
   onSystemResumed(cb: () => void): () => void
   onWindowVisibility(cb: (visible: boolean) => void): () => void
+  /** the window's close button hid the app to the tray (not a minimize): leave any open setup */
+  onWindowClosedToTray(cb: () => void): () => void
   /** sitting state changed (once a minute while sitting, and on break/reminder changes) */
   onSittingChanged(cb: (s: SittingState) => void): () => void
   /** update status changed (checking, progress, ready, error …) */

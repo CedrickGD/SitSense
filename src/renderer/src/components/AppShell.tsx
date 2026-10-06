@@ -18,7 +18,9 @@ import type { Stage } from '@shared/posture'
 import { aiAvailable } from '@renderer/ai/helpers'
 import { NAV_ROUTES, useAppStore, type NavRoute } from '@renderer/state/store'
 import { fmtCountdown } from '@renderer/lib/format'
+import { focusWhenReady } from '@renderer/lib/focus'
 import { STAGE_COLOR } from '@renderer/lib/ui'
+import { isSuspended, NOT_JUDGED_COLOR } from '@renderer/lib/score'
 import { breakpointFor, monitoringPillState, useMonitoring, useNow, useWindowWidth } from '@renderer/lib/hooks'
 import { shortVersion } from '@renderer/screens/settings/update-view'
 import { privacyNotice } from './CameraFeed'
@@ -36,6 +38,8 @@ export const PLACE_META: Record<NavRoute, { label: string; icon: IconName }> = {
 
 /** Places whose screen fills the content height itself (no page scroll), e.g. the chat. */
 const FILL_ROUTES: readonly NavRoute[] = ['coach']
+/** id of the coach composer's <textarea> (screens/coach/Composer.tsx) — Ctrl+L focuses it */
+const COACH_COMPOSER_ID = 'coach-composer'
 
 // ───────────────────────────── top bar slots ─────────────────────────────
 
@@ -103,12 +107,14 @@ export function WindowControls(): JSX.Element {
 
 /**
  * The brand mark: the spine icon in the live state color — sage while fine (or idle),
- * the worst issue's stage color while watching, slate while paused.
+ * the worst issue's stage color while watching, slate while paused or while nothing is
+ * judged (the view drifted far from setup).
  */
 function BrandMark({ size }: { size: number }): JSX.Element {
   const m = useMonitoring()
   const stage = useAppStore((s) => s.snapshot?.worstStage ?? 0)
-  const color = m.paused ? 'var(--color-slate-cool)' : STAGE_COLOR[m.watching ? stage : 0]
+  const suspended = useAppStore((s) => isSuspended(s.snapshot))
+  const color = m.paused ? 'var(--color-slate-cool)' : m.watching && suspended ? NOT_JUDGED_COLOR : STAGE_COLOR[m.watching ? stage : 0]
   return <AppMark size={size} color={color} />
 }
 
@@ -131,7 +137,8 @@ export function AppMark({ size = 28, color = 'var(--color-sage)' }: { size?: num
 function useLiveAlertStage(): Stage {
   const m = useMonitoring()
   const stage = useAppStore((s) => s.snapshot?.worstStage ?? 0)
-  return m.watching ? stage : 0
+  const suspended = useAppStore((s) => isSuspended(s.snapshot))
+  return m.watching && !suspended ? stage : 0
 }
 
 interface NavItemProps {
@@ -250,7 +257,7 @@ const PAUSE_ITEMS = (pause: (minutes: number | null) => void): MenuItem[] => [
   { label: 'Until I resume', onClick: () => pause(null) }
 ]
 
-/** Sidebar footer pill (§2.3): monitoring / paused (countdown) / camera unavailable / not set up. */
+/** Sidebar footer pill (§2.3): monitoring / paused (countdown) / camera unavailable / not set up / new camera. */
 function MonitoringPill({ compact }: { compact: boolean }): JSX.Element {
   const m = useMonitoring()
   const setRoute = useAppStore((s) => s.setRoute)
@@ -276,7 +283,11 @@ function MonitoringPill({ compact }: { compact: boolean }): JSX.Element {
           : 'Paused'
         : state === 'camera'
           ? 'Camera unavailable'
-          : 'Not set up'
+          : state === 'mismatch'
+            ? 'Nudges off · new camera'
+            : 'Not set up'
+  // camera trouble and a baseline for another camera are both sorted out on Live
+  const opensLive = state === 'camera' || state === 'mismatch'
 
   if (compact) {
     const overlay = <StatusDot color={dot} pulse={state === 'monitoring'} size={7} className="absolute top-1.5 right-1.5 ring-2 ring-surface" />
@@ -293,13 +304,13 @@ function MonitoringPill({ compact }: { compact: boolean }): JSX.Element {
     return (
       <IconButton
         icon={state === 'paused' ? 'play' : 'chevron-right'}
-        label={state === 'paused' ? `${label} — resume` : state === 'camera' ? `${label} — open Live` : `${label} — set up posture`}
+        label={state === 'paused' ? `${label} — resume` : opensLive ? `${label} — open Live` : `${label} — set up posture`}
         size={40}
         variant="secondary"
         ringOn="surface"
         tooltipPlacement="right"
         overlay={overlay}
-        onClick={() => (state === 'paused' ? void window.sitsense.setPause(false) : state === 'camera' ? setRoute('live') : openSetup())}
+        onClick={() => (state === 'paused' ? void window.sitsense.setPause(false) : opensLive ? setRoute('live') : openSetup())}
       />
     )
   }
@@ -317,7 +328,7 @@ function MonitoringPill({ compact }: { compact: boolean }): JSX.Element {
     )
   } else if (state === 'paused') {
     action = <IconButton icon="play" label="Resume" size={28} ringOn="card" onClick={() => void window.sitsense.setPause(false)} />
-  } else if (state === 'camera') {
+  } else if (opensLive) {
     action = <IconButton icon="chevron-right" label="Open Live" size={28} ringOn="card" onClick={() => setRoute('live')} />
   } else {
     action = <IconButton icon="chevron-right" label="Set up posture" size={28} ringOn="card" onClick={() => openSetup()} />
@@ -492,9 +503,20 @@ function TopBar({ title, onSlots }: { title: string; onSlots: (s: TopBarSlots) =
 
 // ───────────────────────────── keyboard ─────────────────────────────
 
-/** Ctrl+1…4 places · Ctrl+, Settings · Ctrl+Shift+P pause/resume (§2.3, §6.2 About). */
+/** The coach composer's textarea (screens/coach/Composer.tsx); null while absent or disabled. */
+function coachComposer(): HTMLTextAreaElement | null {
+  const el = document.getElementById(COACH_COMPOSER_ID)
+  return el instanceof HTMLTextAreaElement && !el.disabled ? el : null
+}
+
+/**
+ * Ctrl+1…4 places · Ctrl+, Settings · Ctrl+L ask the coach (opens Coach and focuses the
+ * message box; on Coach itself CoachScreen's own listener handles it) · Ctrl+Shift+P
+ * pause/resume (§2.3, §6.2 About).
+ */
 function useShellShortcuts(): void {
   useEffect(() => {
+    let cancelFocus = (): void => undefined
     const onKey = (e: KeyboardEvent): void => {
       if (!e.ctrlKey || e.altKey || e.metaKey || e.defaultPrevented) return
       const s = useAppStore.getState()
@@ -506,13 +528,22 @@ function useShellShortcuts(): void {
       } else if (!e.shiftKey && e.key === ',') {
         e.preventDefault()
         s.openSettings()
+      } else if (!e.shiftKey && (e.key === 'l' || e.key === 'L') && s.route !== 'coach') {
+        e.preventDefault()
+        s.setRoute('coach')
+        // the composer mounts with the Coach screen a frame or two later
+        cancelFocus()
+        cancelFocus = focusWhenReady(coachComposer, 10)
       } else if (e.shiftKey && (e.key === 'P' || e.key === 'p')) {
         e.preventDefault()
         void window.sitsense.setPause(!s.pause.paused, null)
       }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      cancelFocus()
+      window.removeEventListener('keydown', onKey)
+    }
   }, [])
 }
 
@@ -533,7 +564,13 @@ export default function AppShell({ children }: { children: ReactNode }): JSX.Ele
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar title={PLACE_META[route].label} onSlots={setSlots} />
         <SlotsContext.Provider value={slots}>
-          <main id="content" className={`min-h-0 flex-1 ${fill ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto'}`}>
+          {/* stable gutter: the content width never depends on whether the page overflows, so
+              width-measured layouts (Settings' category nav) can't loop with the scrollbar.
+              Only on scrolling routes — on overflow:hidden it would reserve a useless strip. */}
+          <main
+            id="content"
+            className={`min-h-0 flex-1 ${fill ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]'}`}
+          >
             <div
               key={route}
               className={`mx-0 flex w-full max-w-[1280px] flex-col ${pad} pt-2 ${fill ? 'h-full' : 'min-h-full'} motion-safe:animate-[screenIn_180ms_ease-out]`}

@@ -1,13 +1,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, expect, it } from 'vitest'
-import { AI_CHAT_LIMITS, DEFAULT_AI_SETTINGS, type AiChatRequest, type AiSettings } from '../../shared/ai'
+import { AI_CHAT_LIMITS, AI_PRESETS, AI_PROVIDER_KINDS, DEFAULT_AI_SETTINGS, type AiChatRequest, type AiSettings } from '../../shared/ai'
 import { AiError } from '../ai/errors'
 import { CHAT_SYSTEM_PROMPT, buildChatSystemPrompt, buildContextBlock, cleanReply, runChat } from '../ai/coach'
 import { createAdapters, type AdapterSet, type ChatRequest, type ProviderAdapter } from '../ai/providers'
-import { CHAT_MAX_OUTPUT_TOKENS } from '../ai/providers/types'
+import { CHAT_MAX_OUTPUT_TOKENS, KEY_REQUIRED } from '../ai/providers/types'
 import { CHAT_DISABLED_MESSAGE, PAUSED_MESSAGE, createAiService } from '../ai/service'
 import { FAKE_KEYS, JPEG_B64, conn, fakeBackend, fakeFetch, makeKeyStore, settingsHolder, type Reply } from '../ai/test-utils'
-import { sanitizeChatContext, validateChatMessages, validateChatRequest } from '../ai/validate'
+import { sanitizeChatContext, validateChatMessages, validateChatRequest, type ChatLiveContext } from '../ai/validate'
 
 const signal = (): AbortSignal => new AbortController().signal
 
@@ -257,6 +257,11 @@ describe('sanitizeChatContext', () => {
     expect(sanitizeChatContext({ recentAlerts: alerts })?.recentAlerts).toHaveLength(AI_CHAT_LIMITS.maxRecentAlerts)
     expect(sanitizeChatContext({ live: { localInstruction: 'y'.repeat(999) } })?.live?.localInstruction).toHaveLength(200)
   })
+
+  it('keeps the "set up with another camera" flag (booleans only)', () => {
+    expect(sanitizeChatContext({ live: { calibrated: false, baselineOtherCamera: true } })?.live).toEqual({ calibrated: false, baselineOtherCamera: true })
+    expect(sanitizeChatContext({ live: { calibrated: false, baselineOtherCamera: 'yes' } })?.live).toEqual({ calibrated: false })
+  })
 })
 
 describe('validateChatRequest', () => {
@@ -311,6 +316,23 @@ describe('coach prompt', () => {
     expect(buildChatSystemPrompt({ image: { jpegB64: JPEG_B64, share: 'snapshot' } })).toMatch(/webcam snapshot/)
   })
 
+  it('a baseline saved with another camera is never described as "not set up"', () => {
+    const now = 10 * 86_400_000
+    const block = buildContextBlock(
+      {
+        live: { presence: 'active', calibrated: false, baselineOtherCamera: true } as ChatLiveContext,
+        baseline: { capturedAt: now - 2 * 86_400_000, view: 'side', verified: true }
+      },
+      now
+    )
+    expect(block).not.toMatch(/has not saved a reference posture/)
+    expect(block).toMatch(/posture setup done: yes, but with a different camera/)
+    expect(block).toMatch(/not judged/)
+    expect(block).toContain('- captured with a different camera than the one in use now')
+    // without the flag the old wording stays
+    expect(buildContextBlock({ live: { calibrated: false } })).toMatch(/has not saved a reference posture yet/)
+  })
+
   it('cleans replies: think blocks, control chars, blank runs, length cap', () => {
     expect(cleanReply('<think>secret plan</think>\n\nSit tall.\u0007\n\n\n\nBreathe.')).toBe('Sit tall.\n\nBreathe.')
     expect(cleanReply('<think>never closed')).toBe('')
@@ -349,7 +371,7 @@ describe('runChat', () => {
       b: () => Promise.resolve('  See a physio if it persists.  ')
     })
     const r = await runChat(aiSettings(), REQ, { adapters, getKey, timeoutMs: 500 })
-    expect(r).toEqual({ ok: true, reply: 'See a physio if it persists.', connectionLabel: 'Backup', model: 'gpt-6-luna' })
+    expect(r).toEqual({ ok: true, reply: 'See a physio if it persists.', connectionLabel: 'Backup', model: 'gpt-6-luna', connectionId: 'b', fallbackFrom: 'Primary' })
     expect(adapters.seen.map((s) => s.conn.id)).toEqual(['a', 'b'])
     expect(adapters.seen[0].system).toContain(CHAT_SYSTEM_PROMPT)
     expect(adapters.seen[0].messages).toEqual(REQ.messages)
@@ -365,6 +387,35 @@ describe('runChat', () => {
     if (r.ok) return
     expect(r.message).toMatch(/^All AI connections failed — Primary: .* · Backup: The model returned an empty answer\.$/)
     expect(r.message).not.toContain(getKey('a'))
+    // every provider was asked and failed: the renderer may point to AI settings
+    expect(r.fromModel).toBe(true)
+  })
+
+  it('flags a fallback answer even when both connections share a label', async () => {
+    const twins: AiSettings = {
+      ...DEFAULT_AI_SETTINGS,
+      enabled: true,
+      connections: [conn({ id: 'a', label: 'Google Gemini' }), conn({ id: 'b', label: 'Google Gemini' })]
+    }
+    const adapters = scripted({ a: () => Promise.reject(new AiError('bad-key', 'The API key was rejected.')), b: () => Promise.resolve('Sit back.') })
+    const r = await runChat(twins, REQ, { adapters, getKey, timeoutMs: 500 })
+    expect(r).toMatchObject({ ok: true, connectionId: 'b', connectionLabel: 'Google Gemini' })
+    if (!r.ok) return
+    expect(r.fallbackFrom).not.toBeNull()
+    expect(r.fallbackFrom).toBe('Google Gemini (#1)')
+    // same label, different model: the model tells them apart
+    const models: AiSettings = { ...twins, connections: [conn({ id: 'a', model: 'gemini-x' }), conn({ id: 'b' })] }
+    const r2 = await runChat(models, REQ, { adapters, getKey, timeoutMs: 500 })
+    expect(r2).toMatchObject({ ok: true, fallbackFrom: 'Google Gemini (gemini-x)' })
+    // the first connection answered: no fallback note
+    const ok = scripted({ a: () => Promise.resolve('Fine.'), b: () => Promise.resolve('x') })
+    expect(await runChat(twins, REQ, { adapters: ok, getKey, timeoutMs: 500 })).toMatchObject({ ok: true, connectionId: 'a', fallbackFrom: null })
+  })
+
+  it('main and the renderer agree on which providers need a key', () => {
+    for (const kind of AI_PROVIDER_KINDS) {
+      expect(KEY_REQUIRED.has(kind)).toBe(AI_PRESETS.find((p) => p.kind === kind)?.keyRequired)
+    }
   })
 
   it('times out a hanging connection and stops on cancel', async () => {
@@ -413,7 +464,7 @@ describe('AiService.chat', () => {
 
   it('answers and never sends anything when AI is off', async () => {
     const { svc, f } = service()
-    expect(await svc.chat(ask)).toEqual({ ok: true, reply: 'Hello!', connectionLabel: 'Google Gemini', model: 'gemini-3.5-flash-lite' })
+    expect(await svc.chat(ask)).toEqual({ ok: true, reply: 'Hello!', connectionLabel: 'Google Gemini', model: 'gemini-3.5-flash-lite', connectionId: 'g1', fallbackFrom: null })
     const off = service({ enabled: false })
     expect(await off.svc.chat(ask)).toEqual({ ok: false, message: CHAT_DISABLED_MESSAGE })
     expect(off.f.calls).toHaveLength(0)
@@ -446,10 +497,40 @@ describe('AiService.chat', () => {
     expect(sent).toContain('nudges shown: 7')
   })
 
-  it('runs one chat at a time; pausing interrupts only chats carrying camera data', async () => {
+  it('a new question replaces an abandoned one instead of failing with "still answering"', async () => {
+    const { svc, f } = service({ route: (i) => (i === 0 ? 'hang' : googleOk('Second answer.')) })
+    const first = svc.chat(ask)
+    const second = svc.chat({ messages: [{ role: 'user', content: 'And my chair?' }] })
+    expect(await first).toEqual({ ok: false, message: 'The coach was interrupted.' })
+    expect(await second).toMatchObject({ ok: true, reply: 'Second answer.' })
+    expect(f.calls).toHaveLength(2)
+    // the interrupted chat is not the model's fault
+    expect((await first as { fromModel?: boolean }).fromModel).toBeUndefined()
+  })
+
+  it('cancelChat stops a text-only chat (cancelPostureData does not reach it)', async () => {
+    const { svc } = service({ route: () => 'hang' })
+    const text = svc.chat(ask)
+    svc.cancelPostureData()
+    const still = await Promise.race([text.then(() => 'settled'), new Promise((r) => setTimeout(() => r('pending'), 30))])
+    expect(still).toBe('pending')
+    svc.cancelChat()
+    expect(await text).toEqual({ ok: false, message: 'The coach was interrupted.' })
+    svc.cancelChat() // nothing in flight: a no-op
+  })
+
+  it('a stale chat finishing late does not clear the newer chat’s cancel handle', async () => {
+    const { svc } = service({ route: () => 'hang' })
+    const first = svc.chat(ask)
+    const second = svc.chat(ask)
+    await first // settled (interrupted) — its cleanup must leave the second one cancellable
+    svc.cancelChat()
+    expect(await second).toEqual({ ok: false, message: 'The coach was interrupted.' })
+  })
+
+  it('pausing interrupts only chats carrying camera data', async () => {
     const { svc } = service({ route: () => 'hang' })
     const first = svc.chat({ ...ask, context: { live: { neckFwdDeg: 5 } } })
-    expect(await svc.chat(ask)).toMatchObject({ ok: false, message: expect.stringMatching(/still answering/) })
     svc.cancelPostureData()
     expect(await first).toEqual({ ok: false, message: 'The coach was interrupted.' })
 

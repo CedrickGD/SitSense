@@ -10,7 +10,7 @@ import { recipientPhrases, setupLine, shareDisclosure } from '@renderer/componen
 import { clearCoachHistory, coachHistoryCount, useCoachStore } from '@renderer/screens/coach/coachStore'
 import { plural } from '@renderer/lib/format'
 import { useAppStore } from '@renderer/state/store'
-import { historyLine, isAtDefaults, keysLine, resetPatch, updateCheckLine } from './meta'
+import { historyLine, isAtDefaults, keysLine, resetPatch, updateCheckLine, updateOnlyRequestLine } from './meta'
 import { SettingsCard, SettingsGrid } from './parts'
 
 const STAYS: { icon: IconName; text: string; sub: string }[] = [
@@ -47,6 +47,8 @@ export default function PrivacyPage({ settings }: { settings: Settings }): JSX.E
 
 function CanLeaveCard({ settings }: { settings: Settings }): JSX.Element {
   const setCategory = useAppStore((s) => s.setSettingsCategory)
+  // an installed copy also downloads a newer version after a check; null (not loaded yet) reads as installed
+  const updateMode = useAppStore((s) => s.update?.mode ?? null)
   // only connections a request can really call (on, with key/model/address) are named
   const recipients = recipientPhrases(settings.ai.connections)
   const on = settings.ai.enabled && recipients.length > 0
@@ -89,7 +91,7 @@ function CanLeaveCard({ settings }: { settings: Settings }): JSX.Element {
                 <p className="type-body-lg text-text">{settings.updates.autoCheck ? 'Only an update check.' : 'Nothing.'}</p>
                 <p className="type-body text-text-dim">
                   {settings.updates.autoCheck
-                    ? 'With AI models off, the only request SitSense makes is asking GitHub for its latest version.'
+                    ? updateOnlyRequestLine(updateMode)
                     : 'With AI models and automatic update checks off, SitSense makes no network requests.'}
                 </p>
                 <p className="mt-3 max-w-[60ch] type-caption text-text-faint">
@@ -101,7 +103,7 @@ function CanLeaveCard({ settings }: { settings: Settings }): JSX.Element {
         </div>
       )}
       <div className="mt-4 flex flex-wrap items-start gap-x-3 gap-y-1 border-t border-white/[0.06] pt-3">
-        <p className="min-w-0 flex-1 basis-64 type-caption text-text-dim">{updateCheckLine(settings.updates.autoCheck)}</p>
+        <p className="min-w-0 flex-1 basis-64 type-caption text-text-dim">{updateCheckLine(settings.updates.autoCheck, updateMode)}</p>
         <LinkButton tone="dim" arrow onClick={() => setCategory('about')}>
           Updates
         </LinkButton>

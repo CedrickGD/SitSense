@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { Notification } from 'electron'
 import { IPC, type SittingState } from '../shared/ipc'
 import type { PostureSnapshot } from '../shared/posture'
-import { BreakTracker, SNOOZE_DEFAULT_MIN, type SittingInput } from './break-tracker'
+import { BREAK_MIN_MS, BreakTracker, SNOOZE_DEFAULT_MIN, type SittingInput } from './break-tracker'
 import { getPauseState, onPauseChanged } from './pause'
 import { resourcesDir } from './resources'
 import { getSettings } from './settings-store'
@@ -26,15 +26,22 @@ let lastSentKey = ''
 /** held so the toast's click/action handlers aren't garbage-collected */
 let toast: Notification | null = null
 
+/** how long the user must be away for it to count as a break — from the tracker, so the copy can't drift */
+const BREAK_MINUTES = Math.round(BREAK_MIN_MS / 60_000)
+
 export function reminderCopy(minutes: number): { title: string; body: string } {
   return {
     title: 'Time to stand up',
-    body: `You’ve been sitting for ${minutes} min. A 2-minute walk resets your back.`
+    body: `You’ve been sitting for ${minutes} min. Stand up and walk around for ${BREAK_MINUTES} minutes to reset your timer.`
   }
 }
 
 function currentInput(now: number): SittingInput {
   if (getPauseState().paused) return 'absent'
+  // before posture setup nothing is monitored (ui-v3 §6: no reminder "before setup"), so no
+  // stretch, no reminder and no counted break. The saved baseline decides, not the snapshot's
+  // flag, so a camera switch after setup doesn't silence the reminders.
+  if (!getSettings().calibration) return 'absent'
   if (!lastSnapshot || now - lastSnapshotAt > STALE_MS) return 'absent'
   return lastSnapshot.presence === 'active' ? 'sitting' : 'absent'
 }
@@ -125,7 +132,9 @@ export function snoozeBreak(minutes: unknown = SNOOZE_DEFAULT_MIN): SittingState
   return getSittingState()
 }
 
-/** settings changed (interval / enabled): the next reminder time moved */
+/** settings changed (interval / enabled / baseline saved or deleted): re-evaluate at once */
 export function breaksSettingsChanged(): void {
-  publish()
+  // tick() publishes; without a tracker yet there is nothing to re-evaluate but the state
+  if (tracker) tick()
+  else publish()
 }

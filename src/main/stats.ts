@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { app } from 'electron'
@@ -9,7 +9,9 @@ import { getPauseState } from './pause'
 /**
  * Per-minute posture log for the dashboard's Today strip.
  * Samples the last known snapshot every 5s; each finished minute stores its
- * dominant state. Files: userData/stats/YYYY-MM-DD.json, pruned after 90 days.
+ * dominant state. Files: userData/stats/YYYY-MM-DD.json, pruned after 90 days (at
+ * start and at every day change). A day file that can't be read is never written over
+ * blindly: it is quarantined (corrupt) or merged in once readable (locked).
  */
 
 const SAMPLE_MS = 5_000
@@ -120,6 +122,8 @@ function currentStateKey(): StatMinute['s'] {
   // not-detecting bucket
   if (!lastSnapshot.calibrated) return 'paused'
   if (lastSnapshot.presence === 'away') return 'away'
+  // the view drifted far from setup: nothing is judged, so the minute is not "good" either
+  if (lastSnapshot.suspended === true) return 'paused'
   if (lastSnapshot.worstStage === 0) return 'good'
   const worst = Object.values(lastSnapshot.issues).reduce((a, b) => (b.stage > a.stage ? b : a))
   return `${worst.issue}:${worst.stage as 1 | 2 | 3}`
@@ -137,17 +141,18 @@ function sample(): void {
   minuteCounts.set(key, (minuteCounts.get(key) ?? 0) + 1)
 }
 
-/** midnight rollover — write out the finished day, start a fresh day file */
+/** date change (midnight, or the clock set back/corrected) — write out the old day, load the new one */
 function rollDayIfNeeded(): void {
   if (!loadedDate || todayKey() === loadedDate) return
   // the minute in progress still belongs to the day that just ended
   finishMinute()
   flush()
   pastDayCache.delete(loadedDate)
-  minutes = []
-  alerts = 0
-  breaks = 0
-  loadedDate = todayKey()
+  // the new date may already have a file (clock set back): continue it instead of overwriting it
+  loadDay(todayKey())
+  pastDayCache.delete(loadedDate)
+  // the tray app can run for weeks; keep the 90-day retention promise without a restart
+  pruneOld()
 }
 
 function dominant(): StatMinute['s'] | null {
@@ -162,31 +167,149 @@ function dominant(): StatMinute['s'] | null {
   return best
 }
 
+/** keep `minutes` sorted by m with one entry per minute (the clock may have been set back) */
+function upsertMinute(m: number, s: StatMinute['s']): void {
+  const last = minutes[minutes.length - 1]
+  // common case: append, or overwrite after an app restart within the same minute
+  if (!last || last.m < m) minutes.push({ m, s })
+  else if (last.m === m) last.s = s
+  else {
+    const i = minutes.findIndex((e) => e.m >= m)
+    if (minutes[i].m === m) minutes[i].s = s
+    else minutes.splice(i, 0, { m, s })
+  }
+}
+
 function finishMinute(): void {
   const state = dominant()
   if (state && currentMinute > 0) {
-    // an app restart within the same minute would otherwise duplicate the entry
-    const last = minutes[minutes.length - 1]
-    if (last && last.m === currentMinute) last.s = state
-    else minutes.push({ m: currentMinute, s: state })
+    upsertMinute(currentMinute, state)
     scheduleWrite()
   }
   minuteCounts = new Map()
 }
 
-function loadToday(): void {
-  loadedDate = todayKey()
-  try {
-    const raw = JSON.parse(readFileSync(join(statsDir(), `${loadedDate}.json`), 'utf8')) as TodayStats
-    if (Array.isArray(raw.minutes)) minutes = raw.minutes.filter((m) => typeof m?.m === 'number')
-    const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0)
-    alerts = n(raw.alerts)
-    breaks = n(raw.breaks)
-  } catch {
-    minutes = []
-    alerts = 0
-    breaks = 0
+const dayFile = (date: string): string => join(statsDir(), `${date}.json`)
+const READ_RETRY_DELAY_MS = 150
+const errCode = (err: unknown): string => (err as NodeJS.ErrnoException | null)?.code ?? 'UNKNOWN'
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+type ReadResult = { ok: true; text: string } | { ok: false; code: string; error: unknown }
+
+/** Read the file; on anything but "does not exist", retry after a short pause (`attempts` total). */
+function readDayText(file: string, attempts: number): ReadResult {
+  let last: ReadResult = { ok: false, code: 'UNKNOWN', error: null }
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return { ok: true, text: readFileSync(file, 'utf8') }
+    } catch (err) {
+      last = { ok: false, code: errCode(err), error: err }
+      if (last.code === 'ENOENT') return last
+      if (attempt < attempts - 1) sleepSync(READ_RETRY_DELAY_MS)
+    }
   }
+  return last
+}
+
+type DayData = { minutes: StatMinute[]; alerts: number; breaks: number }
+
+/** Parse a day file; null when it isn't a JSON object (truncated / garbage). A leading BOM is fine. */
+function parseDay(text: string): DayData | null {
+  let raw: unknown
+  try {
+    raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
+  } catch {
+    return null
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Partial<TodayStats>
+  const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0)
+  return {
+    minutes: Array.isArray(r.minutes) ? r.minutes.filter((m) => typeof m?.m === 'number').sort((a, b) => a.m - b.m) : [],
+    alerts: n(r.alerts),
+    breaks: n(r.breaks)
+  }
+}
+
+/** Move a day file that doesn't parse out of the way so no later write destroys it. */
+function quarantineCorrupt(file: string): boolean {
+  const backup = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`
+  try {
+    renameSync(file, backup)
+  } catch {
+    try {
+      copyFileSync(file, backup)
+    } catch (err) {
+      console.error('[stats] could not back up the corrupt day file:', err)
+      return false
+    }
+  }
+  console.error(`[stats] ${file} is corrupt; moved it to ${backup}`)
+  return true
+}
+
+/**
+ * Today's file exists but couldn't be read (locked by AV/backup at login) or couldn't be
+ * moved aside: the day is tracked in memory from zero and must be merged into the file
+ * before anything is written over it (see flush()).
+ */
+let unmergedDisk = false
+
+function loadToday(): void {
+  loadDay(todayKey())
+}
+
+/** Make `date` the day in memory: every field is reset first, then its file (if any) is loaded. */
+function loadDay(date: string): void {
+  loadedDate = date
+  minutes = []
+  alerts = 0
+  breaks = 0
+  unmergedDisk = false
+  const file = dayFile(date)
+  const read = readDayText(file, 2)
+  if (!read.ok) {
+    if (read.code === 'ENOENT') return // no data for this day yet
+    unmergedDisk = true
+    console.error(`[stats] ${file} is unreadable (${read.code}); tracking continues and is merged into it later:`, read.error)
+    return
+  }
+  const data = parseDay(read.text)
+  if (!data) {
+    // if the backup failed, the original stays and must never be overwritten
+    unmergedDisk = !quarantineCorrupt(file)
+    return
+  }
+  ;({ minutes, alerts, breaks } = data)
+}
+
+/**
+ * Fold the on-disk day into memory once it can be read. Returns false while it still can't
+ * be (the write must then be skipped so the file's earlier minutes survive).
+ */
+function mergeUnmergedDisk(file: string): boolean {
+  const read = readDayText(file, 1)
+  if (!read.ok) {
+    if (read.code !== 'ENOENT') return false
+    unmergedDisk = false
+    return true
+  }
+  const disk = parseDay(read.text)
+  if (!disk) {
+    if (!quarantineCorrupt(file)) return false
+    unmergedDisk = false
+    return true
+  }
+  const inMemory = new Set(minutes.map((e) => e.m))
+  minutes = [...disk.minutes.filter((e) => !inMemory.has(e.m)), ...minutes].sort((a, b) => a.m - b.m)
+  // the in-memory counters started at 0 when the read failed
+  alerts += disk.alerts
+  breaks += disk.breaks
+  unmergedDisk = false
+  return true
 }
 
 function scheduleWrite(): void {
@@ -201,7 +324,12 @@ function scheduleWrite(): void {
 function flush(): void {
   try {
     mkdirSync(statsDir(), { recursive: true })
-    const file = join(statsDir(), `${loadedDate || todayKey()}.json`)
+    const file = dayFile(loadedDate || todayKey())
+    if (unmergedDisk && !mergeUnmergedDisk(file)) {
+      // still locked/unreadable: keep the data in memory and try again on the next write
+      console.warn(`[stats] ${file} still can't be read; postponing the write so its earlier data isn't lost`)
+      return
+    }
     const tmp = `${file}.tmp`
     writeFileSync(tmp, JSON.stringify({ date: loadedDate, minutes, alerts, breaks } satisfies TodayStats))
     renameSync(tmp, file)
@@ -236,5 +364,7 @@ export function __resetStatsForTests(): void {
   alerts = 0
   breaks = 0
   loadedDate = ''
+  unmergedDisk = false
+  writePending = false
   pastDayCache.clear()
 }

@@ -121,6 +121,18 @@ export default function PostureGuide({ focus, size = 150 }: { focus: GuideFocus;
           className="motion-safe:animate-[softPulse_2s_ease-in-out_infinite]"
         />
       )}
+      {/* the hips are seen, but the back angle can't be judged from this camera: mark the back */}
+      {focus === 'verify' && (
+        <path
+          d={line([TARGET.pelvis[0] - 6, TARGET.pelvis[1]], [TARGET.shoulder[0] - 6, TARGET.shoulder[1]])}
+          fill="none"
+          stroke="var(--color-amber)"
+          strokeWidth="1.8"
+          strokeDasharray="3 3"
+          strokeLinecap="round"
+          className="motion-safe:animate-[softPulse_2s_ease-in-out_infinite]"
+        />
+      )}
       {focus === 'side' && (
         <circle
           cx={TARGET.shoulder[0]}

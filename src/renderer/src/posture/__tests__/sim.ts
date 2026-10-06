@@ -492,6 +492,49 @@ export interface SimOptions {
    * axes, i.e. as if the model knew where its crop was.
    */
   cropRay?: boolean
+  /**
+   * Render a phantom instead of the seated user: the same body, moved, turned and scaled as a
+   * figure (a print on the desk, a poster, someone across the room). The image shows the
+   * figure; the world landmarks are human-size, as the pose model reconstructs any person.
+   */
+  figure?: FigurePlacement
+}
+
+/** Where a phantom figure is (SimOptions.figure). Room frame. */
+export interface FigurePlacement {
+  /** size relative to the simulated person (a printed figure: well below 1) */
+  scale: number
+  /** room directions of the body's up (hips → head) and forward (its face); made orthogonal */
+  up: Vec3
+  forward: Vec3
+  /** room position of the figure's chest (the body point (0, 0.3, 0)) */
+  at: Vec3
+}
+
+/** The body's points as the camera sees them: positions, normals, and hip-relative world vectors (human size). */
+interface PlacedBody {
+  points: Vec3[]
+  normals: Vec3[]
+  hipMid: Vec3
+  /** world landmark i before the camera rotation: point minus hip midpoint, human size */
+  rel: (i: number) => Vec3
+}
+
+function placeBody(sk: Skeleton, fig: FigurePlacement | undefined): PlacedBody {
+  const hip = scale(add(sk.points[23], sk.points[24]), 0.5)
+  if (!fig) return { points: sk.points, normals: sk.normals, hipMid: hip, rel: (i) => sub(sk.points[i], hip) }
+  const u = unit(fig.up) as Vec3
+  const f = unit(sub(fig.forward, scale(u, dot(fig.forward, u)))) as Vec3
+  const l = cross(u, f)
+  const R = (v: Vec3): Vec3 => add(scale(l, v[0]), add(scale(u, v[1]), scale(f, v[2])))
+  const chest: Vec3 = [0, 0.3, 0]
+  const points = sk.points.map((q) => add(fig.at, scale(R(sub(q, chest)), fig.scale)))
+  return {
+    points,
+    normals: sk.normals.map(R),
+    hipMid: scale(add(points[23], points[24]), 0.5),
+    rel: (i) => R(sub(sk.points[i], hip))
+  }
 }
 
 const LR_PAIRS: Array<[number, number]> = [
@@ -576,8 +619,7 @@ export class PoseSim {
    * rotated by its inverse. Null when ~on axis.
    */
   cropRotation(p: PostureParams): { axis: Vec3; deg: number } | null {
-    const sk = skeleton(p)
-    const hip = this.project(scale(add(sk.points[23], sk.points[24]), 0.5))
+    const hip = this.project(placeBody(skeleton(p), this.opts.figure).hipMid)
     const cx = clamp(hip[0], -0.5, 1.5)
     const cy = clamp(hip[1], -0.5, 1.5)
     const ray = unit([((cx - 0.5) * this.cam.aspect) / this.focal, (cy - 0.5) / this.focal, 1]) as Vec3
@@ -588,9 +630,9 @@ export class PoseSim {
 
   /** Render one frame (with noise unless the sim was built with NO_NOISE). */
   render(p: PostureParams): PoseFrame {
-    const sk = skeleton(p)
+    const sk = placeBody(skeleton(p), this.opts.figure)
     const crop = this.opts.cropRay === false ? null : this.cropRotation(p)
-    const hipMid = scale(add(sk.points[23], sk.points[24]), 0.5)
+    const hipMid = sk.hipMid
     const image: Landmark[] = []
     const world: Landmark[] = []
     const n = this.noise
@@ -614,7 +656,7 @@ export class PoseSim {
       const occluded = this.opts.deskOcclusion === true && i >= 23
       if (!inFrame) vis = 0.05
       else if (occluded) vis = 0.1
-      let w = this.toCam(sub(P, hipMid))
+      let w = this.toCam(sk.rel(i))
       if (crop) w = rotate(w, crop.axis, -crop.deg)
       if (!inFrame || occluded) w = add(w, this.biases[i])
       image.push({
@@ -718,4 +760,75 @@ export function viewpointGrid(rollCycle: readonly number[] = GRID_ROLLS): Viewpo
     }
   )
   return out
+}
+
+// ---------------------------------------------------------------------------
+// phantoms: person-like things that are not the user (docs/specs/detection.md, Implementation
+// notes, "Presence plausibility"). MediaPipe reconstructs each one at human size.
+
+/** The camera's room pose (position and axes) for a viewpoint. */
+export function cameraPose(cam: CameraParams): { position: Vec3; axes: { x: Vec3; y: Vec3; z: Vec3 }; focal: number } {
+  const s = new PoseSim(cam, { noise: NO_NOISE })
+  return { position: s.position, axes: s.axes, focal: s.focal }
+}
+
+/** The camera's horizontal viewing direction (room frame). */
+const headingOf = (cam: CameraParams): Vec3 => {
+  const z = cameraPose(cam).axes.z
+  return unit([z[0], 0, z[2]]) ?? Z
+}
+
+export interface DeskPhantomOptions {
+  /**
+   * Where the figure's head points on the desk, degrees about the vertical from the camera's
+   * horizontal viewing direction: 0 = away from the camera (along the line of sight), 180 =
+   * toward it, ±90 = across the view (a desk-mat print lying left–right).
+   */
+  headingDeg: number
+  /** the figure faces up (default) or lies face down */
+  faceUp?: boolean
+  /** figure size relative to a person (default 0.45: a ~60 cm desk-mat figure) */
+  scale?: number
+  /** desk surface below the camera, metres (default 0.35) */
+  deskDrop?: number
+  /** where the figure's chest appears in the picture: normalized offset below the centre (default 0.15) */
+  imageV?: number
+  /** horizontal image offset of the chest, normalized (default 0) */
+  imageU?: number
+}
+
+/**
+ * A figure lying flat on the desk (a print on a desk mat, a figurine), seen by the camera from
+ * above: its chest where the ray through (imageU, imageV) meets the desk plane. Null when that
+ * ray does not reach the desk within 1.5 m (a camera looking up, or level, sees no desk there).
+ */
+export function deskPhantom(cam: CameraParams, o: DeskPhantomOptions): FigurePlacement | null {
+  const pose = cameraPose(cam)
+  const v = o.imageV ?? 0.15
+  const u = (o.imageU ?? 0) * cam.aspect
+  const ray = unit(add(pose.axes.z, add(scale(pose.axes.y, v / pose.focal), scale(pose.axes.x, u / pose.focal)))) as Vec3
+  const drop = o.deskDrop ?? 0.35
+  if (!(ray[1] < -1e-3)) return null
+  const t = drop / -ray[1]
+  if (!(t > 0.15 && t <= 1.5)) return null
+  const head = rotate(headingOf(cam), Y, o.headingDeg)
+  return {
+    scale: o.scale ?? 0.45,
+    up: head,
+    forward: o.faceUp === false ? ([0, -1, 0] as Vec3) : Y,
+    at: add(pose.position, scale(ray, t))
+  }
+}
+
+/**
+ * An upright figure facing the camera `distance` metres along the ray through the normalized
+ * image offset (imageU, imageV) from the centre: a poster on a wall (scale < 1) or a person
+ * across the room (scale 1).
+ */
+export function uprightPhantom(cam: CameraParams, distance: number, figScale: number, imageU = 0, imageV = 0): FigurePlacement {
+  const pose = cameraPose(cam)
+  const ray = unit(
+    add(pose.axes.z, add(scale(pose.axes.y, imageV / pose.focal), scale(pose.axes.x, (imageU * cam.aspect) / pose.focal)))
+  ) as Vec3
+  return { scale: figScale, up: Y, forward: scale(headingOf(cam), -1), at: add(pose.position, scale(ray, distance)) }
 }

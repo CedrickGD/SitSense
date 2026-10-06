@@ -131,6 +131,8 @@ means the wrong endpoint for this key or that the API is not enabled.
   aiTestConnection(id: string): Promise<AiTestResult>        // tiny text-only request; updates lastTest
   aiListModels(id: string): Promise<{ ok: true; models: string[] } | { ok: false; message: string }>
   aiReviewPosture(req: AiReviewRequest): Promise<AiPostureReview>
+  aiCancelReview(requestId: string): Promise<void>  // the renderer abandoned that review: abort it, free the slot
+  aiChatCancel(): Promise<void>                       // Stop / Clear chat: abort the running chat
   ```
 
 ## 5. Posture review request and response
@@ -138,6 +140,7 @@ means the wrong endpoint for this key or that the API is not enabled.
 ```ts
 interface AiReviewRequest {
   purpose: 'setup' | 'check'
+  requestId?: string             // [A-Za-z0-9_-]{1,64}; names the review for aiCancelReview (main makes one if absent)
   imageJpegB64: string           // sketch or snapshot per ai.share (renderer builds it)
   share: 'sketch' | 'snapshot'
   measurements: {                // from the on-device model; null = not measurable
@@ -147,6 +150,11 @@ interface AiReviewRequest {
     localVerdict: 'good' | 'adjust'; localInstruction: string | null
   }
 }
+
+// One review runs at a time (one slot holding { id, abort }). A review the renderer stops,
+// dismisses or takes over (Ask AI dismissed, setup skipped / restarted / left / hidden) is
+// cancelled by id, so the next check or setup capture never fails on a busy slot; a late
+// `finally` only frees its own slot.
 
 type AiPostureReview =
   | { ok: true; connectionLabel: string; model: string; verdict: 'good' | 'adjust'; score: number;
@@ -202,7 +210,10 @@ interface AiChatRequest {
   context?: { live?; today?; history?; baseline?; recentAlerts? }  // AiChatContext in shared/ai.ts
   image?: { jpegB64: string; share: 'sketch' | 'snapshot' }
 }
-type AiChatReply = { ok: true; reply: string; connectionLabel: string; model: string } | { ok: false; message: string }
+type AiChatReply =
+  | { ok: true; reply: string; connectionLabel: string; model: string
+      connectionId?: string; fallbackFrom?: string | null }   // fallbackFrom: the connection that failed first ("Label (model)" when labels repeat)
+  | { ok: false; message: string; fromModel?: true }          // fromModel: every connection was asked and failed
 ```
 
 * **Messages.** At most 200 sent; control characters stripped, consecutive same-role turns
@@ -214,8 +225,12 @@ type AiChatReply = { ok: true; reply: string; connectionLabel: string; model: st
   system prompt.
 * **Consent.** Requires `ai.enabled`. An image follows the review rules: refused while paused,
   and `share` must equal `settings.ai.share`. While paused, `context.live` is removed before
-  sending. Only one chat runs at a time. Pausing aborts chats that carry an image or live data,
-  and switching AI off aborts everything.
+  sending. Only one chat runs at a time: a newer chat aborts the older one (which resolves
+  "The coach was interrupted."), and `aiChatCancel()` (Stop / Clear chat) aborts it outright,
+  so an abandoned question stops spending tokens. Pausing aborts chats that carry an image or
+  live data, and switching AI off aborts everything. `context.live.baselineOtherCamera` tells
+  the model a reference posture exists but was saved with another camera (not "never set
+  up"); while detection is suspended (view changed) the renderer sends no stages.
 * **Providers.** Same priority order, 25 s per-connection timeout, error mapping, response-size
   cap and sender validation as reviews. Gemini/Vertex use `contents` with roles `user`/`model`
   plus `systemInstruction` (thinkingLevel LOW on 3.x, retried without it on a 400).

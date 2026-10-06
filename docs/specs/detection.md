@@ -67,7 +67,13 @@ frame expanded by 5% on every side.
 A frame is **GOOD** iff a pose was detected, world landmarks are present, the head is seen
 (nose seen OR any ear seen), and at least one shoulder is seen. Otherwise it is **BAD** and
 feeds the presence state machine (§8). Nothing else is required: no centering, no second
-shoulder, no ears, no hips.
+shoulder, no ears, no hips. The pose must, however, be plausibly a person sitting at the
+screen: not farther than a desk user (or than a few times the user's own setup distance),
+and upright for some level-camera pitch (a figure
+printed on a desk mat, a poster, someone behind the user are not the user; Implementation
+notes, "Presence plausibility"). `frameReject(frame)` / `engine.frameReject` /
+`SetupState.frameReject` say why a frame is BAD: `'no-pose' | 'not-in-view' | 'too-far' |
+'not-upright'`; the last two mean "not you".
 
 ## 3. Per-frame geometry (`features.ts`, pure)
 
@@ -264,7 +270,7 @@ optical yaw (75–105°); `trunkKnown` = `absolute` and the trunk in view.
 | `trunkKnown` otherwise | good (basis `absolute`) — the only way it is verified |
 | not `trunkKnown`, `headOnTrunk < −8°` | adjust forward (leaning in; basis `relative`, a hint) |
 | no hip in view | `unknown`, unverified; hips outside the picture: "Tilt the camera down a little so your hips are in the picture — SitSense needs them to check your back."; hips in the picture but hidden or judged hallucinated: "Sit tall against your backrest — your hips are hidden, so SitSense can't check your back from this camera." |
-| a hip in view, no absolute reference | `unknown`, unverified: "Sit tall against your backrest — SitSense can't judge your back angle from straight in front." |
+| a hip in view, no absolute reference | `unknown`, unverified: a front view "Sit tall against your backrest — SitSense can't judge your back angle from straight in front."; an angled (or not-quite-profile) view "…from this camera angle." (`backFromAngle`) |
 
 **Lying signature.** `neckOnTrunk > 12°` (the neck cranes forward on the trunk — a plain
 look down tips the head, not the neck) AND either `trunkKnown` with `trunkFwd < −18°`
@@ -285,6 +291,39 @@ trunk, the neck angle carries the camera's unknown pitch: only a neck past any p
 tilt (`neckFwd > 20°·k` with the gravity's own k — 1.3 hips, 1.6 camera —, basis
 `estimate`, assumes a roughly level camera) is called out; otherwise `unknown` and
 unverified (instruction: the hips' one).
+
+**Coaching vs confirming (v0.2.1).** The widened sagittal limits (× k: 1.3 thigh gravity,
+1.6 camera) only decide what is *coached*. An absolute reading between the plain ergonomic
+limit and its widened one — trunk 12–15.6°, neck 20–26° with thigh gravity — is `unknown`
+(not coached, not confirmed: reason "within the allowance for an imprecise gravity
+reference"; the trunk gets "sit back and look ahead", the head the head-forward line). The
+allowance models the reference's error (a thigh slope, a small camera roll), which can hide
+a slump as easily as fake one. On top of that, an absolute reading only confirms when:
+
+* the hip line agrees with a level camera (`levelUnconfirmed` false). Otherwise both
+  `trunkUpright` and `headOverShoulders` stay unconfirmed with `INSTRUCTIONS.levelCamera`
+  ("…straighten the camera — it looks tilted…"): a rolled camera leaks into the sagittal
+  angles of a turned body, because the estimate keeps the camera level;
+* the head does not tip as far forward on the trunk as when lying back (`headOnTrunk` and
+  `neckOnTrunk` past the lying thresholds × slack → unconfirmed, "sit back and look ahead");
+* a forward trunk reading is backed by the head on the trunk: the corroboration bar rises
+  with the reading, `headOnTrunk ≥ VERIFY_HEAD_ON_TRUNK_MIN + VERIFY_HEAD_ON_TRUNK_PER_DEG ·
+  max(0, trunkFwd)` (1°/°). A slump on a seat whose knees point down reads up to ~10° too
+  upright, with the head tipped back on it.
+
+Trade-off: someone truly leaning ~10° in while looking straight ahead is no longer confirmed
+locally; they are never coached wrongly and go to the review (or "save anyway").
+
+**Hips instruction.** "…so your hips are in the picture — SitSense needs them to check your
+back" (`showHips`) is only used where the hips *would* let the back be checked (thigh
+gravity in use or knees in view, or a near-profile view). Elsewhere the back gets the
+front/angle instruction and the head check `showHipsForHead` ("…to check your head
+position").
+
+**Near-profile hysteresis (setup).** A view is near-profile from `SIDE_VIEW_YAW` (75°); while
+holding or capturing — and in the final exam of an unforced capture — it stays so down to
+75° − `SIDE_VIEW_YAW_HYST` (5°). The session's yaw is the median over the 2 s window. A
+capture discarded as unverifiable sets the exam's instruction, so the user is told why.
 
 The lateral checks and `gaze` are unchanged (not essential: `unknown` never blocks them).
 In a near-profile view the gaze is now judged absolutely (it was on the trunk); a gaze
@@ -372,8 +411,14 @@ toward the person's **left**. It is reported as `'left' | 'right'` in the user's
 | `forward` | `(anchor − anchor₀) · forward₀` in cm (toward the screen; `forward₀` = baseline `F̂`) | 7 / 13 / 19 | always |
 
 ### Recalibration hint
-`D = ppm / ppm₀`. If `D ∉ [0.5, 1.8]` for 10 s while ACTIVE, set `recalibrationSuggested`
-and suspend all detectors until `D` returns to range or the user recalibrates (same as v1).
+`D = ppm / ppm₀`. If `D ∉ [0.5, 1.8]` for 10 s while ACTIVE, set `recalibrationSuggested`.
+While the hint is up and `D` is still out of range, every detector is suspended
+(`snapshot.suspended = true`, all stages 0): the UI shows "View changed" and no score
+(ui-v3 §3.4), the tray is neutral ("view changed — redo posture setup"), the history
+minute is not counted as good (`paused` bucket) and the coach gets no stages. Once `D` is
+back in range, detection resumes at once; the hint is withdrawn after the view has stayed
+in range for `RECAL_SUGGEST_S` (10 s) — a camera that really moved keeps it up. Redoing
+setup clears it.
 
 ## 6. Smoothing
 
@@ -486,8 +531,11 @@ baseline's value; readers fall back when they are absent.
 
 ## 8. Presence and episode machines
 
-Presence ACTIVE/AWAY (enter 2.0 s, exit 1.5 s, full reset after 30 s away), and
-per-issue IDLE → PENDING → ALERTED → RECOVERING → COOLDOWN with dwell, cooldown, escalation,
+Presence ACTIVE/AWAY (enter 2.0 s, exit 1.5 s, full reset after 30 s away). The engine
+starts AWAY: nobody counts as present — sitting, judged — until 1.5 s of real landmarks
+(an app launched at login must not open a sitting stretch for an empty chair). A gap
+without frames longer than the full reset (pause, sleep, camera restart) also returns to
+AWAY until the person is confirmed again. Per issue: IDLE → PENDING → ALERTED → RECOVERING → COOLDOWN with dwell, cooldown, escalation,
 band-hold and data-loss reset (see `episodeMachine.ts` and `constants.ts`; long gaps,
 cooldown arming and quiet-period escalation: Implementation notes). There is no reminder:
 the machine never emits `kind: 'reminder'` (the shared `AlertKind` keeps the value for
@@ -507,7 +555,11 @@ readout?: {
   /** live deviations from the baseline (deg / cm), null when unavailable */
   neckFwd: number | null; trunkFwd: number | null; drop: number | null
   forward: number | null; lateral: number | null
+  /** what `lateral` was measured from: the neck tilt has its own stages (8/14/22°) */
+  lateralFrom?: 'trunk' | 'neck'
 }
+/** every detector paused: the view is far off the setup distance (§5 Recalibration hint) */
+suspended?: boolean
 ```
 
 The engine also exposes `lastFeatures` (the latest `PostureFeatures`) for the overlay.
@@ -569,6 +621,14 @@ MediaPipe-shaped output. It is the main test harness for "works from any angle".
      angles match the truth from every viewpoint with any gravity and the assumed FOV;
      lying back after a good setup raises Slouching from every view (stage ≥ 2 from 35°
      where the trunk is visible), a brief lean back does not.
+  7. (`phantoms.test.ts`) Phantoms (`SimOptions.figure`: the body moved, turned and
+     scaled, its world landmarks human-size): a figure lying flat across the view on a desk
+     below any grid camera is never GOOD; with a measured gravity a flat figure in any
+     orientation is never GOOD; a small print, a poster figure and a person 4.5 m away are
+     too far. An empty chair with a phantom keeps the engine AWAY (uncalibrated, and after
+     the user leaves), raises no alert, and keeps setup searching. Every seated posture —
+     the extremes lying back 50° with the head going along and a 35° hunch included — stays
+     GOOD from every viewpoint, also with the saved baseline's gravity.
 
 ## 11. Constants (defaults)
 
@@ -582,8 +642,11 @@ MediaPipe-shaped output. It is the main test harness for "works from any angle".
 | outlier jump / max consec | 0.35 / 3 | `DT_CAP` | 0.5 s |
 | `AWAY_ENTER/EXIT/FULL_RESET` | 2.0 / 1.5 / 30 s | `RECAL_D_MIN/MAX`, `RECAL_SUGGEST_S` | 0.5 / 1.8, 10 s |
 | sink stages | trunkFwd 10/18/28°, drop 5/10/16 cm, torso 0.07/0.12/0.18, recline 20/28/36° (v3; `RECLINE_CRANE_GAIN` 1.5) | headForward | neck 10/18/28°, neckDrop 0.15/0.28/0.42, pitch 15/25/35° |
+| near profile | `SIDE_VIEW_YAW` 75–105°, setup hysteresis `SIDE_VIEW_YAW_HYST` 5° | forward-trunk corroboration | `VERIFY_HEAD_ON_TRUNK_PER_DEG` 1°/° |
 | v3 judge | recline limit −25° (lying below −32°); lying: neckOnTrunk > 12°, and headOnTrunk > 36° with a known trunk < −18°, else > 48°; leaning in: headOnTrunk < −8°; corroboration: headOnTrunk ≥ 0° | v3 setup | `UNVERIFIED_FORCE_AFTER_S` 3 s, `ASSESS_RELATIVE_WINDOW_S` 2 s, `HIP_TWIST_HYST` ±3° |
 | lean stages | trunkLat 6/11/18°, neckLat 8/14/22°, shoulderTilt 5/9/15°, headRoll 8/14/22° | tooClose | forward 7/13/19 cm |
+| presence: depth / neck and trunk from up | `PRESENCE_MAX_DEPTH_M` 3.0 m, with a baseline ×`PRESENCE_BASELINE_DEPTH_RATIO` 2.5 of its depth (≥ +1.0 m, ≤ 4.5 m) / `PRESENCE_NECK_MAX` 72° (trunk from `PRESENCE_TRUNK_MIN_M` 0.2 m) | presence: shoulder line / pitch search | `PRESENCE_SHOULDER_TILT_MAX` 45°, falling from a 25° recline to 8° at 72° (`PRESENCE_ROLL_FULL_UNTIL` / `_AT_NECK_MAX`) / `PRESENCE_PITCH_MIN…MAX` −45…75° |
+| presence: tracking a stale gravity | `PRESENCE_TRACK_GAP_S` 0.5 s, `PRESENCE_TRACK_JUMP_M` 0.3 m, `PRESENCE_TRACK_TURN_MAX` 40° | | |
 
 ---
 
@@ -632,6 +695,110 @@ so it never gains a lateral offset when one side is cut off.
 and ≥ 2 measurable scale segments. A head cut off at the top (only the nose visible)
 cannot be measured or calibrated, so the user is coached to move into the picture
 instead.
+
+**Presence plausibility (§2).** MediaPipe finds a "person" in anything person-like and
+reconstructs it at human size. A real recording: with the chair empty, a printed anime figure
+on the desk mat, lying flat in front of an elevated camera, was tracked as "Seeing head,
+shoulders & hips"; sitting time ran, break reminders would have fired and setup coached the
+print. Posters and people behind the user are the same risk. A GOOD frame therefore also has
+to be plausible for someone sitting at the screen (`presenceReject`, features.ts; the
+reasons are exposed as `FrameReject`):
+- *Distance* (`'too-far'`). The shoulders' perspective-fit depth (`f / ppm`, assumed 65° FOV)
+  is ≤ `presenceMaxDepth`. Without a baseline (setup, an uncalibrated engine) that is
+  `PRESENCE_MAX_DEPTH_M = 3.0 m`: desk users sit 0.3–1.5 m away and the unknown FOV scales
+  the reading ×0.8–1.45 for 55–85° lenses, so a desk user lying back reads ≤ ~2.6 m (the
+  simulator's desk viewpoints: ≤ 2.6 m). A small figure is reconstructed at human size, i.e.
+  ×(person / figure) farther away, and a person 4 m away reads ≥ 3.1 m through any lens of 52°
+  or more (3.5 m away: through ≥ 58°). A figure of scale s at distance d is indistinguishable
+  from a person at d / s — the image is identical — so only that equivalent distance can be
+  judged. With a baseline of this camera (`ExtractOptions.baselinePpm`, set by
+  `extractOptionsFor`) the bound follows the user's own depth D_b read through the same lens:
+  `max(2.5·D_b, D_b + 1 m)`, at most 4.5 m. The ratio of two depths read through one lens does
+  not depend on its FOV, so a user who sat 0.8 m away is followed out to ~2 m (the
+  recalibration hint starts at 2× the setup distance) while a figure or a person reading
+  ≥ 2.5× farther is not the user; and a user who set up 1–2 m from a wide-angle webcam can lean
+  back without crossing the absolute bound.
+- *Uprightness* (`'not-upright'`). A seated user's neck (shoulder midpoint → ear point) is
+  within `PRESENCE_NECK_MAX = 72°` of up: lying back 50° with the head going along, or a 35°
+  hunch with the head forward, stays ~15–20° inside it; a body lying flat is at 90°. The
+  trunk (hip → shoulder, a hip seen, ≥ 20 cm) is held to the same bound: it is three times
+  longer than the neck, so its direction is far less noisy (the neck's depth noise in the
+  simulator, ~10°/frame, let ~5% of a flat figure's frames through on the neck alone;
+  hallucinated hips move the trunk by ≤ 12°). Gravity, however, is often unknown: camera-only
+  gravity from a 60°-pitched camera is 60° off, so a fixed test against camUp would drop a
+  user leaning toward a steep camera (a 40° hunch under a 50° camera read 69° with the true
+  pitch, 119° against camUp). The test is therefore **pitch-free** (webcams are level, roll
+  ≲ 3°, at an unknown pitch): the pose is upright if SOME level camera pitch in −45…75°
+  (`PRESENCE_PITCH_MIN/MAX`, a margin around the supported −30…65°) puts neck and trunk
+  within 72° of up and the shoulder line (both shoulders in the frame) within
+  `PRESENCE_SHOULDER_TILT_MAX = 45°` of horizontal. The user's true pitch is always such a
+  witness, so no real user is rejected for the camera's angle. A flat figure lying ACROSS
+  the view (as desk-mat prints do) has its neck and trunk along the camera's horizontal x
+  axis, which is perpendicular to every level up: rejected from every camera (the simulator:
+  within ±10° of across from every grid camera, also off-centre and through wide lenses).
+- *Roll budget* (diagonal prints). A flat figure at heading h from the line of sight, seen by
+  a camera pitched p, has its neck at `cos h · sin(p − q)` along the up of a witness pitch q,
+  and its shoulder line at `sin h · sin(p − q)`: with only the bounds above, a witness pitch
+  far below the real one (the camera "looking up" 10–45°) made a print up to ~65° from the
+  line of sight (25° off across) upright enough — the real screenshot's figure lies visibly
+  diagonal. For that witness the figure is reclined AND rolled at once (h = 60°: reclined
+  55–68° with the shoulders 32–45° off level), which a seated user is not: one who leans far
+  sideways is upright in the body's sagittal plane, one lying back far keeps the shoulders
+  level. So the shoulder-line tilt allowed falls with the recline — the trunk (else the
+  neck) in the body's sagittal plane, its sideways part removed so a lean is not counted twice
+  — from 45° at a recline of `PRESENCE_ROLL_FULL_UNTIL = 25°` to `PRESENCE_ROLL_AT_NECK_MAX =
+  8°` at 72° (`rollMaxAt`). In the simulator (every grid camera, centred, off-centre and
+  life-size placements, face up or down), prints 55–90° from the line of sight (≤ 35° off
+  across) are GOOD in < 1% of noise-free placements (off-centre ones, whose view ray turns them)
+  and < 3% of noisy frames — never 1.5 s in a row, so presence stays away (before: 60–80% of
+  noisy frames); 50° from it: 14%. Real users are rejected in 0.09% of noisy frames (lying back
+  60–65° with roll noise; before: 0.07%).
+- *Measured gravity.* A flat figure lying ALONG the line of sight is a rigid rotation about
+  the camera's x axis away from a reclined user under another pitch — e.g. lying flat, head
+  away from a 60° camera, is exactly a user reclined 30° under a level one: no pitch-free test
+  can tell them apart. When the pitch is measured, neck and trunk must also be within 72° of
+  that gravity (`ExtractOptions.gravityKnown`), which rejects a flat figure in any
+  orientation. Measured means: thigh gravity (`upSource 'body'`, the default), or at runtime a
+  baseline with `'body'` or `'hips'` gravity (`baselinePitchKnown`; in the simulator within
+  ~11° of the truth, so a flat figure reads ≥ 79°, a user lying back 50° ≤ 61°). Camera-only
+  baselines are not: without a trunk they keep the assumed pitch (20° off from a camera
+  looking up), and the trunk refinement of a turned body recovers only ~cos(yaw) of the pitch
+  (23–30° off at 60° yaw). A hip-line estimate during setup is not either (facing the camera
+  it has no pitch).
+- *A stale measured gravity.* The baseline's gravity is only as good as the camera's aim: after
+  the webcam is re-aimed by ~35° (or "Keep it for this camera" adopts a baseline from a camera
+  pitched differently) a user lying back 40–50° reads 75–85° from it and would vanish instead
+  of being flagged. The engine therefore follows the **tracked user**: a track is established
+  by 1.5 s (`AWAY_EXIT_S`) of fully GOOD frames, each continuing the previous one (shoulder
+  anchor within `PRESENCE_TRACK_JUMP_M = 0.3 m`, neck direction — head − anchor, camera axes —
+  within `PRESENCE_TRACK_TURN_MAX = 40°`; the simulator's frame-to-frame p99.9 is 0.23 m /
+  35°), and is followed by every GOOD frame that continues it, for up to
+  `PRESENCE_TRACK_GAP_S = 0.5 s` between them. While present and tracked, a frame that fails
+  only the measured-gravity test (the pitch-free test still passes) and continues the track
+  counts as GOOD. A figure never builds a track: a noisy frame that slips through now and
+  then is not 1.5 s of continuous ones, and the jump from the user to a print on the desk
+  breaks the track (the simulator: the pose model jumping straight from the user to the print,
+  no gap — every desk heading and size stays away). Not covered: a user who is ALREADY lying
+  back 40°+ when they are first seen after such a re-aim is not acquired until they sit up
+  (no alert either way); with a re-aim of 45° even an upright user hunching 25° reads beyond
+  72°. A camera moved that far invalidates the baseline anyway (its gravity-referenced angles
+  are off by the same amount); redo setup.
+- *Limits.* No geometric test separates an upright, person-like figure from a person at its
+  equivalent distance (d / s, see Distance): an acrylic standee or framed portrait 43 cm tall
+  0.6 m from the camera, or a life-size poster ≤ 2.7 m away (65–70° lens), reads like a person
+  sitting 2.4–2.7 m away and is GOOD without a baseline (with one taken at ≤ 1 m it is too far).
+  A flat print lying within ~45° of the line of sight passes the pitch-free test (only a
+  measured gravity rejects it). The depth bound trades narrow lenses against ultra-wide ones,
+  because the FOV is unknown: a person 3.5 m away through a 55° lens reads 2.9 m (GOOD), while
+  without a baseline a 110° lens reaches the bound with the user ~1.5 m away (lying back 40°:
+  ~1.3 m), a 120° lens at ~1.1 m; 90–100° lenses only beyond 1.5 m. Once set up, the bound is
+  relative to the user's own distance. With camera-only gravity and a profile view, a 40° hunch
+  with the head dropped toward the desk (neck ≥ 75° from vertical) is rejected; front and
+  angled views accept it.
+- An image-plane test (the neck pointing "up" in the picture) was tried and dropped: a user
+  leaning toward a camera above them is seen with the head *below* the shoulders (the neck
+  dips under the line of sight), and the neck's image direction is noise when it runs near
+  the viewing ray. The world-landmark vectors already carry the image-plane direction.
 
 **Gravity (§3.2): a level-camera model.** Webcams are mounted level — their **roll** (the
 rotation about the optical axis, i.e. the tilt of the true vertical at the image centre,
@@ -921,6 +1088,15 @@ occlusion and label swaps.
   oracle from hollowing out the tests.
 - Issue stages are read as the sustained (median) stage over 2 s. `SIM_SEED_OFFSET=<n>`
   re-runs the grid with other noise draws.
+- **Phantoms** (`SimOptions.figure`, `deskPhantom`, `uprightPhantom`). The body is moved,
+  turned and scaled (a print or figurine: scale < 1); the image shows the figure, the world
+  landmarks stay human-size, as MediaPipe reconstructs any person. `deskPhantom` lays it flat
+  (face up or down, any heading relative to the camera's view) on a desk plane 35 cm below
+  the camera, where a ray through the lower half of the picture meets it (cameras looking up
+  see no desk); `uprightPhantom` stands it facing the camera at a distance (a poster, a
+  person across the room). A rigid figurine is a stand-in for a print: MediaPipe's 3D guess for a
+  flat drawing seen obliquely is unknown, but its image-plane geometry — which the world
+  landmarks' x/y follow — is what the across test rests on.
 
 **Known limitations.**
 - **v3: what landmarks cannot show.** A slump whose only signs are a compressed, rounded
@@ -975,7 +1151,9 @@ occlusion and label swaps.
   unknown); for a turned body nothing can: a hip line read with roll 0 turns the roll into
   pitch (~r·cot β), e.g. 8° at 15° yaw reads as a ~29° pitch. Deviations from the baseline
   are unaffected (the roll is constant), and the trunk refinement bounds the pitch error of
-  hip-line baselines.
+  hip-line baselines. Setup (v0.2.1) no longer confirms the back or head while the hip line
+  contradicts a level camera, which closed the rolled-grid leak (0 of 723 bad postures
+  saved over 3 seeds); an ~8° roll in an angled view can still, rarely, get through.
 - **Viewing-ray correction.** The correction is a model of MediaPipe's behaviour, not a
   documented fact. It assumes the 65° HFOV, so it leaves the residual above on wider or
   narrower webcams.
@@ -986,3 +1164,15 @@ occlusion and label swaps.
   reads ×0.8–1.4 of the truth for 55–85° webcams, within the ±1 stage tolerance.
 - **Very close views.** At ≤ 0.6 m, body parts straddle the frame edge and the readings are
   noisier.
+- **Phantoms along the line of sight.** Without a measured gravity (no baseline yet, a
+  camera-only baseline, early setup), a flat figure lying roughly along the camera's line of
+  sight (more than ~20° from across) is indistinguishable from a reclined user under another
+  camera pitch, and is rejected only when it is small enough to be too far. With a body or
+  hip-line baseline it is always rejected. A life-size poster of a person close to the camera
+  is upright and near: it is not rejected.
+- **Phantoms under noise.** With only the neck (no hip in view) the per-frame test on a flat
+  figure is noisy in the simulator (~5% of frames pass on its 10× real depth jitter). The
+  engine needs 1.5 s of consecutive GOOD frames, so presence stays away; setup's warm-up
+  counts GOOD frames with gaps < 1 s and could start coaching such a figure in the
+  simulator. With a hip in view (the tested case, as on the real desk mat) the trunk test
+  leaves no frame through.

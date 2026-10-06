@@ -15,7 +15,8 @@ import {
   type PostureReadout,
   type PostureSnapshot,
   type PresenceState,
-  type Stage
+  type Stage,
+  type Vec3
 } from '@shared/posture'
 import {
   AWAY_ENTER_S,
@@ -29,6 +30,9 @@ import {
   LAT_YAW_SLACK,
   NECK_DROP_MAX_YAW,
   PITCH_ONLY_DWELL_MULT,
+  PRESENCE_TRACK_GAP_S,
+  PRESENCE_TRACK_JUMP_M,
+  PRESENCE_TRACK_TURN_MAX,
   RECLINE_CRANE_GAIN,
   RECAL_D_MAX,
   RECAL_D_MIN,
@@ -42,11 +46,11 @@ import {
   TAU_SCALE_S
 } from './constants'
 import { EpisodeMachine, type EpisodeConfig } from './episodeMachine'
-import { extractFeatures, type ExtractOptions } from './features'
+import { extractFeaturesChecked, type ExtractOptions } from './features'
 import { MetricSmoother, ScaleOutlierGate } from './smoothing'
 import { effThreshold, recThreshold } from './stage'
-import type { Frame, PostureBaseline, PostureFeatures } from './types'
-import { angleDeg, dot, neg, reject, scale, sub, unit } from './vec'
+import type { Frame, FrameReject, PostureBaseline, PostureFeatures } from './types'
+import { angleDeg, dot, neg, norm, reject, scale, sub, unit } from './vec'
 
 export interface EngineIssueSettings {
   enabled: boolean
@@ -106,14 +110,28 @@ export const baselineNeckLatRef = (b: CalibrationBaseline): 'trunk' | 'gravity' 
  * The extraction options that measure a frame the way the baseline was measured: its
  * gravity, its forward (orientation fallback and the body frame in a head + one
  * shoulder view), and its use of the hips (hips ignored during setup — hidden or judged
- * hallucinated — stay ignored, so every body reference matches the baseline's).
+ * hallucinated — stay ignored, so every body reference matches the baseline's). Presence is
+ * held to the baseline's gravity when its pitch was measured, and to a depth bound relative
+ * to the baseline's own distance (ExtractOptions.baselinePpm).
  */
 export const extractOptionsFor = (b: CalibrationBaseline): ExtractOptions => ({
   up: b.up,
   upSource: b.upSource,
   forwardHint: b.forward,
-  hips: b.trunkFwd !== null
+  hips: b.trunkFwd !== null,
+  gravityKnown: baselinePitchKnown(b),
+  baselinePpm: b.ppm
 })
+
+/**
+ * The baseline's camera pitch was measured, so the presence check may hold a frame to its
+ * gravity (ExtractOptions.gravityKnown): thigh gravity, or a hip line (its perspective, or —
+ * facing the camera — refined by the captured trunk). In the simulator both are within ~11°
+ * of the truth. Camera-only gravity is not: without a trunk it keeps the pitch it assumed
+ * (20° off from a camera looking up at the user), and the trunk refinement of a turned body
+ * recovers only ~cos(yaw) of the pitch (23–30° off at 60° yaw).
+ */
+export const baselinePitchKnown = (b: CalibrationBaseline): boolean => b.upSource !== 'camera'
 
 /**
  * Raw per-frame deviations from the baseline (§5). Positive = worse, except the
@@ -236,6 +254,13 @@ interface IssueEval {
   pitchOnly: boolean
 }
 
+/** One frame of the tracked user: time, shoulder anchor and neck (head − anchor), camera metres. */
+interface TrackPoint {
+  t: number
+  anchor: Vec3
+  neck: Vec3
+}
+
 /**
  * The per-frame pipeline. Public shape is unchanged from v1:
  * `new PostureEngine(baseline, settings)`, `setBaseline`, `updateSettings`,
@@ -260,15 +285,25 @@ export class PostureEngine {
   private pitchOnly = false
 
   private lastT: number | null = null
-  private presence: PresenceState = 'active'
+  /**
+   * starts 'away': nobody counts as present (sitting, judged) until AWAY_EXIT_S of real
+   * landmarks — an app launched at login must not open a sitting stretch for an empty chair
+   */
+  private presence: PresenceState = 'away'
   private badMs = 0
   private goodMs = 0
   private awayStartT: number | null = null
 
   private recalOutMs = 0
+  /** time back in range while the hint is up (it is withdrawn after RECAL_SUGGEST_S) */
+  private recalInMs = 0
   private recalSuggested = false
 
   private features: PostureFeatures | null = null
+  private reject: FrameReject | null = 'no-pose'
+  /** the tracked user's latest frame (stepTrack), and a run of GOOD frames that may become one */
+  private track: TrackPoint | null = null
+  private streak: { since: number; last: TrackPoint } | null = null
   private avail: Record<IssueId, boolean> = { sink: false, headForward: false, lean: false, tooClose: false }
 
   constructor(baseline: CalibrationBaseline | null, settings: EngineSettings) {
@@ -285,6 +320,15 @@ export class PostureEngine {
   /** Latest GOOD frame's features (computed with the baseline's gravity when calibrated). */
   get lastFeatures(): PostureFeatures | null {
     return this.features
+  }
+
+  /**
+   * Why the last frame was BAD (null when it was GOOD; see FrameReject). 'too-far' and
+   * 'not-upright' are a pose that is not the user (a figure on the desk, a poster, someone
+   * behind them): the UI should not say it sees the user.
+   */
+  get frameReject(): FrameReject | null {
+    return this.reject
   }
 
   /** Whether each issue had measurable data on the last processed frame. */
@@ -328,6 +372,9 @@ export class PostureEngine {
     if (this.lastT !== null && tMs - this.lastT > AWAY_FULL_RESET_S * 1000) {
       this.badMs = 0
       this.goodMs = 0
+      // nobody has been seen across the gap: presence must be confirmed again
+      this.presence = 'away'
+      this.awayStartT = this.lastT
       this.resetTransientState(false)
       for (const issue of ISSUES) this.machines[issue].reset(true)
     }
@@ -337,8 +384,25 @@ export class PostureEngine {
     const b = this.baseline
 
     // lateral features a little past the limit: the smoothed-yaw gate in computeDeviations decides
-    const f = extractFeatures(frame, b ? { ...extractOptionsFor(b), lateralMaxYaw: LAT_MAX_YAW + LAT_YAW_SLACK } : {})
+    const opts: ExtractOptions = b ? { ...extractOptionsFor(b), lateralMaxYaw: LAT_MAX_YAW + LAT_YAW_SLACK } : {}
+    let checked = extractFeaturesChecked(frame, opts)
+    // A measured gravity rejects a flat figure in any orientation, but it goes stale when the
+    // webcam is re-aimed (or a baseline is kept for another camera): a user lying back 50° then
+    // reads as lying flat. The tracked user (track) stays the user while the pitch-free test
+    // still passes; a pose that appears out of nowhere is held to that gravity.
+    const tracked = this.trackAlive(tMs) && this.presence === 'active'
+    let chained = false
+    if (tracked && checked.reject === 'not-upright' && opts.gravityKnown) {
+      const loose = extractFeaturesChecked(frame, { ...opts, gravityKnown: false })
+      if (loose.features && this.continuesTrack(loose.features, this.track!)) {
+        checked = loose
+        chained = true
+      }
+    }
+    const f = checked.features
+    this.stepTrack(f, tMs, chained)
     this.features = f
+    this.reject = checked.reject
     this.stepPresence(f !== null, dtMs, tMs)
     const active = this.presence === 'active'
 
@@ -378,10 +442,20 @@ export class PostureEngine {
     const D = b !== null && this.scaleSmoother.value !== null ? this.scaleSmoother.value / b.ppm : null
     if (active && D !== null) {
       if (D < RECAL_D_MIN || D > RECAL_D_MAX) {
+        this.recalInMs = 0
         this.recalOutMs += dtMs
         if (this.recalOutMs >= RECAL_SUGGEST_S * 1000) this.recalSuggested = true
       } else {
         this.recalOutMs = 0
+        if (this.recalSuggested) {
+          // back in range as long as it took to raise the hint: the view matches setup again
+          // (a camera that really moved keeps D out of range, and the hint up)
+          this.recalInMs += dtMs
+          if (this.recalInMs >= RECAL_SUGGEST_S * 1000) {
+            this.recalSuggested = false
+            this.recalInMs = 0
+          }
+        }
       }
     }
     // once the hint has fired and the view is still far off, all detectors pause
@@ -422,12 +496,15 @@ export class PostureEngine {
     }
 
     const worstStage = Math.max(...ISSUES.map((i) => issues[i].stage)) as Stage
+    // `suspended`: every detector is paused (the view is far off the setup distance); the UI
+    // (score.ts isSuspended, liveModel statusView), main (stats, tray) and the coach read it
     const snapshot: PostureSnapshot = {
       presence: this.presence,
       issues,
       worstStage,
       calibrated: b !== null,
       recalibrationSuggested: this.recalSuggested,
+      suspended: driftSuspended,
       ts: tMs
     }
     const readout = this.readout(f, active)
@@ -441,13 +518,17 @@ export class PostureEngine {
       const fresh = this.freshAt.get(k)
       return fresh !== undefined && (this.lastT ?? 0) - fresh <= SUB_STALE_S * 1000 ? this.smoothers.get(k)!.value : null
     }
+    const trunkLat = v('trunkLat')
+    const neckLat = trunkLat === null ? v('neckLat') : null
     return {
       view: f.view.kind,
       neckFwd: v('neck'),
       trunkFwd: v('trunkFwd'),
       drop: v('drop'),
       forward: v('forward'),
-      lateral: v('trunkLat') ?? v('neckLat')
+      lateral: trunkLat ?? neckLat,
+      // the neck tilt has its own stage thresholds: the gauge must follow the source
+      lateralFrom: trunkLat === null && neckLat !== null ? 'neck' : 'trunk'
     }
   }
 
@@ -514,6 +595,49 @@ export class PostureEngine {
     }
   }
 
+  /** The track's last frame is at most PRESENCE_TRACK_GAP_S old. */
+  private trackAlive(tMs: number): boolean {
+    return this.track !== null && tMs - this.track.t <= PRESENCE_TRACK_GAP_S * 1000
+  }
+
+  /** The frame's body continues `ref`: shoulders within PRESENCE_TRACK_JUMP_M, neck within PRESENCE_TRACK_TURN_MAX. */
+  private continuesTrack(f: PostureFeatures, ref: TrackPoint): boolean {
+    if (!f.anchor || !f.head) return false
+    return (
+      norm(sub(f.anchor, ref.anchor)) <= PRESENCE_TRACK_JUMP_M &&
+      angleDeg(sub(f.head, f.anchor), ref.neck) <= PRESENCE_TRACK_TURN_MAX
+    )
+  }
+
+  /**
+   * The tracked user: established by AWAY_EXIT_S of fully GOOD frames that each continue the
+   * previous one (what makes the user present in the first place — a figure that slips through
+   * on a noisy frame now and then never builds one), then followed by every GOOD frame (also a
+   * chained one) that continues it. Lost after PRESENCE_TRACK_GAP_S without such a frame.
+   */
+  private stepTrack(f: PostureFeatures | null, tMs: number, chained: boolean): void {
+    const pt: TrackPoint | null = f?.anchor && f.head ? { t: tMs, anchor: f.anchor, neck: sub(f.head, f.anchor) } : null
+    if (this.trackAlive(tMs)) {
+      if (pt && (chained || this.continuesTrack(f!, this.track!))) this.track = pt
+      return
+    }
+    this.track = null
+    if (!pt || chained) {
+      if (this.streak && tMs - this.streak.last.t > PRESENCE_TRACK_GAP_S * 1000) this.streak = null
+      return
+    }
+    const s = this.streak
+    if (s && tMs - s.last.t <= PRESENCE_TRACK_GAP_S * 1000 && this.continuesTrack(f!, s.last)) {
+      s.last = pt
+      if (tMs - s.since >= AWAY_EXIT_S * 1000) {
+        this.track = pt
+        this.streak = null
+      }
+    } else {
+      this.streak = { since: tMs, last: pt }
+    }
+  }
+
   private stepPresence(goodFrame: boolean, dtMs: number, tMs: number): void {
     if (this.presence === 'active') {
       if (goodFrame) {
@@ -553,6 +677,7 @@ export class PostureEngine {
     this.freshAt.clear()
     this.gate.reset()
     this.recalOutMs = 0
+    this.recalInMs = 0
     this.pitchOnly = false
     for (const issue of ISSUES) this.machines[issue].updateConfig(this.machineCfg(issue))
     if (fullEpisodeReset) {

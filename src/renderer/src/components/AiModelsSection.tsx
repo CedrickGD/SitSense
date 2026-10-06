@@ -323,7 +323,7 @@ function WhereCard({ useInSetup }: { useInSetup: boolean }): JSX.Element {
         </div>
         <p className="mt-auto flex items-start gap-2 pt-2 type-caption text-text-faint">
           <Icon name="shield" size={14} className="mt-px shrink-0" />
-          Never runs in the background or while paused.
+          Never runs in the background. While paused, only coach questions are answered — nothing from the camera is sent.
         </p>
       </div>
     </SettingsCard>
@@ -341,6 +341,8 @@ function ConnectionsCard({ dimmed = false }: { dimmed?: boolean }): JSX.Element 
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  // per connection: the newest Test run; an older one resolving late must not replace its result
+  const testSeq = useRef<Record<string, number>>({})
   const listLabelId = useId()
 
   // keep "tested 3 min ago" honest while the screen is open
@@ -374,6 +376,8 @@ function ConnectionsCard({ dimmed = false }: { dimmed?: boolean }): JSX.Element 
   }
 
   const runTest = async (id: string): Promise<void> => {
+    const seq = (testSeq.current[id] ?? 0) + 1
+    testSeq.current[id] = seq
     setTests((t) => ({ ...t, [id]: { running: true } }))
     let result: AiTestResult
     try {
@@ -381,7 +385,15 @@ function ConnectionsCard({ dimmed = false }: { dimmed?: boolean }): JSX.Element 
     } catch (e) {
       result = { ok: false, message: aiErrorMessage(e), latencyMs: null }
     }
-    setTests((t) => ({ ...t, [id]: { running: false, result } }))
+    if (testSeq.current[id] !== seq) return // a newer Test of this connection owns the row
+    // AI switched off meanwhile: the test was cancelled and says nothing about the connection
+    const cancelled = !useAppStore.getState().settings?.ai.enabled
+    setTests((t) => {
+      const next = { ...t }
+      if (cancelled) delete next[id]
+      else next[id] = { running: false, result }
+      return next
+    })
   }
 
   const move = async (c: AiConnection, delta: -1 | 1): Promise<void> => {

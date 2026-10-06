@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, screen, shell } from 'electron'
+import { app, BrowserWindow, Menu, screen, shell } from 'electron'
 import { IPC } from '../shared/ipc'
 import { APP_ORIGIN, MIN_WINDOW, initialWindowSize, isSafeExternalUrl, isTrustedRendererUrl, nextReloadDelay } from './window-guards'
 
@@ -151,6 +151,13 @@ function installSecurityGuards(win: BrowserWindow): void {
 export function createMainWindow(options: { startHidden: boolean; firstHideHint: () => void }): BrowserWindow {
   onFirstHide = options.firstHideHint
 
+  // Electron's default application menu carries Reload (Ctrl+R / Ctrl+Shift+R) and
+  // Toggle DevTools (Ctrl+Shift+I) accelerators even in a frameless window: a stray
+  // Ctrl+R would throw away an in-progress setup or coach chat and restart the camera.
+  // The shipped app has no menu (window controls live in the renderer; copy/paste
+  // work without the Edit menu). Dev keeps the default menu for DevTools/reload.
+  if (app.isPackaged) Menu.setApplicationMenu(null)
+
   const size = initialWindowSize(screen.getPrimaryDisplay().workAreaSize)
   mainWindow = new BrowserWindow({
     width: size.width,
@@ -170,7 +177,10 @@ export function createMainWindow(options: { startHidden: boolean; firstHideHint:
       // sandboxed preload environment provides
       sandbox: true,
       // detection must keep running while the window is hidden in the tray
-      backgroundThrottling: false
+      backgroundThrottling: false,
+      // no DevTools in the shipped exe, even via a stray openDevTools() or a future
+      // menu (Playwright/verify:package attach over CDP and do not need the frontend)
+      devTools: !app.isPackaged
     }
   })
 
@@ -193,6 +203,8 @@ export function createMainWindow(options: { startHidden: boolean; firstHideHint:
   mainWindow.on('close', (e) => {
     if (!quitting) {
       e.preventDefault()
+      // X means "put it away": the renderer leaves an open posture setup (nobody would see it)
+      sendToRenderer(IPC.windowClosedToTray)
       mainWindow?.hide()
       if (!hintShown) {
         hintShown = true

@@ -138,6 +138,38 @@ describe('LiveScreen', () => {
     expect(html).toContain('Posture score unavailable')
   })
 
+  it('suspended detectors: no Good, no score, a redo-setup prompt (view-changed drift)', () => {
+    // what the engine sends after 10 s far off the setup distance: every stage forced to 0
+    const s = { ...snapshot(), recalibrationSuggested: true, suspended: true, readout: { view: 'angled' as const, neckFwd: 4, trunkFwd: null, drop: 3, forward: 30, lateral: 2 } }
+    const html = render({ snapshot: s })
+    expect(html).toContain('View changed')
+    expect(html).not.toContain('>Good<')
+    expect(html).not.toContain('aligned with your setup')
+    expect(html).toContain('Posture score unavailable')
+    expect(html).toContain('Your view changed a lot since setup — redo setup to measure again.')
+    expect(html).toContain('Redo posture setup')
+    // no gauge reading "30 cm closer" in a neutral color
+    expect(html).not.toContain('30 cm closer')
+  })
+
+  it('away with a baseline for another camera does not promise monitoring resumes', () => {
+    const html = render({ snapshot: snapshot({}, 'away'), baselineCameraMismatch: true })
+    expect(html).toContain('Looks like you stepped away')
+    expect(html).not.toContain('Monitoring resumes the moment')
+    expect(html).toContain('Your saved posture is for another camera')
+    // the ordinary away copy is unchanged
+    expect(render({ snapshot: snapshot({}, 'away') })).toContain('Monitoring resumes the moment')
+  })
+
+  it('the dim mesh backdrop is its own setting: Mesh after Lines is still dimmed', () => {
+    const dim = render({}, { overlay: { ...DEFAULT_SETTINGS.overlay, style: 'mesh', meshBackdrop: 'dim' } })
+    expect(dim).toContain('hologram-scanlines')
+    const plain = render({}, { overlay: { ...DEFAULT_SETTINGS.overlay, style: 'mesh', meshBackdrop: 'camera' } })
+    expect(plain).not.toContain('hologram-scanlines')
+    const lines = render({}, { overlay: { ...DEFAULT_SETTINGS.overlay, style: 'skeleton', meshBackdrop: 'dim' } })
+    expect(lines).not.toContain('hologram-scanlines')
+  })
+
   it('camera error shows the fix inside the frame', () => {
     const html = render({ detection: { running: false, delegate: null, targetFps: 10, measuredFps: 0, cameraError: 'in-use' } })
     expect(html).toContain('Your camera is busy')

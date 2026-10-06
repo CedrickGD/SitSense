@@ -17,7 +17,11 @@ import {
   rowKind,
   shortHint,
   splitInstruction,
-  verificationBadge
+  verificationBadge,
+  CAMERA_FIX_COPY,
+  GUIDE_LINE,
+  SIDE_VIEW_GOOD,
+  cameraFix
 } from '../copy'
 
 const OK_ENV = { paused: false, cameraError: false, detectorError: null } as const
@@ -116,7 +120,29 @@ describe('an essential the camera cannot check (§7.4.1)', () => {
     expect(hips.sub).toMatch(/Tilt the camera down.*AI model/)
     const front = primaryCopy(ui({ phase: 'coaching', instruction: FRONT, checks: unk(FRONT), view: 'front' }), { ...OK_ENV, ai: 'off-in-setup' })
     expect(front.text).toBe("I can't judge your back angle from straight in front.")
-    expect(front.sub).toMatch(/Turn the camera a little to the side/)
+    expect(front.sub).toMatch(/Turn the camera to your side/)
+    expect(front.sub).not.toMatch(/a little/)
+  })
+  it('never tells a user whose camera is already to the side to turn it "a little to the side"', () => {
+    for (const view of ['angled', 'side'] as const) {
+      // detection says why (viewFix), or only the instruction does
+      for (const viewFix of ['angle', undefined] as const) {
+        const s = { ...ui({ phase: 'coaching', instruction: FRONT, checks: unk(FRONT), view }), viewFix }
+        expect(cameraFix(s)).toBe('profile')
+        const c = primaryCopy(s, { ...OK_ENV, ai: 'none' })
+        expect(c.text).toBe(CAMERA_FIX_COPY.profile.text)
+        expect(`${c.text} ${c.sub}`).not.toMatch(/straight in front|a little to the side/)
+      }
+      // with an AI model on, the session's own "sit tall" stays — worded for this view
+      const on = primaryCopy(ui({ phase: 'coaching', instruction: FRONT, checks: unk(FRONT), view }), { ...OK_ENV, ai: 'on' })
+      expect(on.text).not.toMatch(/straight in front/)
+      expect(on.text).toMatch(/from this angle/)
+    }
+    // hips seen but the readings disagree (leaning in): a posture fix, not a camera fix
+    const lean = { ...ui({ phase: 'coaching', instruction: 'Sit back against your backrest and look at the middle of your screen.', checks: unk('x'), view: 'side' }), viewFix: 'lean' as const }
+    expect(cameraFix(lean)).toBeNull()
+    // detection's reason wins over a stale instruction
+    expect(cameraFix({ ...ui({ phase: 'coaching', instruction: FRONT, checks: unk(FRONT), view: 'front' }), viewFix: 'hips' })).toBe('hips')
   })
   it('keeps "sit tall" when an AI model really judges it, and an actionable fix first', () => {
     expect(primaryCopy(ui({ phase: 'coaching', instruction: FRONT, checks: unk(FRONT), view: 'front' }), { ...OK_ENV, ai: 'on' }).text).toBe(FRONT)
@@ -134,7 +160,8 @@ describe('an essential the camera cannot check (§7.4.1)', () => {
 })
 
 describe('aiSetupState', () => {
-  const conn = { id: 'a', enabled: true } as never
+  // a connection a request can reach (ai/helpers.ts isUsableConnection: model and key set)
+  const conn = { id: 'a', kind: 'gemini', enabled: true, model: 'gemini-x', hasKey: true, baseUrl: null } as never
   const s = (ai: Record<string, unknown>) => ({ ai: { enabled: true, useInSetup: true, connections: [conn], share: 'sketch', ...ai } }) as never
   it('tells a saved-but-switched-off model apart from none at all', () => {
     expect(aiSetupState(null)).toBe('none')
@@ -143,6 +170,14 @@ describe('aiSetupState', () => {
     expect(aiSetupState(s({ connections: [{ id: 'a', enabled: false }] }))).toBe('turned-off')
     expect(aiSetupState(s({ useInSetup: false }))).toBe('off-in-setup')
     expect(aiSetupState(s({}))).toBe('on')
+  })
+
+  it('says a switched-on connection that cannot be called yet needs finishing, not "turned off"', () => {
+    const keyless = { ...(conn as object), hasKey: false } as never
+    expect(aiSetupState(s({ connections: [keyless] }))).toBe('needs-setup')
+    expect(aiHintCopy('needs-setup', null)?.text).toMatch(/needs a key or a model/)
+    // AI switched off overall stays "turned off"
+    expect(aiSetupState(s({ enabled: false, connections: [keyless] }))).toBe('turned-off')
   })
 })
 
@@ -258,8 +293,18 @@ describe('guideFocus', () => {
     expect(guideFocus(ui({ ...base, checks: [chk('inView', 'good'), chk('trunkUpright', 'adjust', "Sit up a little — x")] }))).toBe('recline')
     expect(guideFocus(ui({ ...base, checks: [chk('inView', 'good'), chk('headOverShoulders', 'adjust', 'Bring your head back.')] }))).toBe('head')
   })
-  it('an unverifiable back points at the hips', () => {
-    expect(guideFocus(ui({ ...base, checks: [chk('inView', 'good'), chk('trunkUpright', 'unknown')] }))).toBe('hips')
+  it('an unverifiable back points at what blocks it: the hips, the camera angle, or leaning in', () => {
+    const unknownBack = [chk('inView', 'good'), chk('trunkUpright', 'unknown')]
+    expect(guideFocus(ui({ ...base, checks: unknownBack }))).toBe('hips')
+    expect(guideFocus({ ...ui({ ...base, checks: unknownBack }), viewFix: 'hips' })).toBe('hips')
+    expect(guideFocus({ ...ui({ ...base, checks: unknownBack }), viewFix: 'angle' })).toBe('verify')
+    expect(guideFocus({ ...ui({ ...base, checks: unknownBack }), viewFix: 'lean' })).toBe('back')
+    expect(guideFocus({ ...ui({ ...base, checks: unknownBack }), viewFix: 'level' })).toBe('verify')
+    expect(guideFocus({ ...ui({ ...base, checks: unknownBack }), viewFix: 'head' })).toBe('head')
+    // a tilted camera says so; a head past the limit leaves the session's own instruction
+    expect(cameraFix({ ...ui({ ...base, checks: unknownBack }), viewFix: 'level' })).toBe('level')
+    expect(cameraFix({ ...ui({ ...base, checks: unknownBack }), viewFix: 'head' })).toBeNull()
+    expect(GUIDE_LINE.verify).not.toMatch(/needs to see your hips/)
     expect(guideFocus(ui({ ...base, checks: [chk('inView', 'good'), chk('trunkUpright', 'good')] }))).toBeNull()
   })
 })
@@ -282,6 +327,21 @@ describe('step 1 probe rows', () => {
     expect(idle[0].text).toBe('Starting the camera…')
     expect(idle.slice(1).every((r) => r.tone === 'pending')).toBe(true)
   })
+  it('"works great" and "straight in front" only where they are true', () => {
+    const env = { running: true, cameraError: null }
+    // a side view the judge can't check the back from (≈65°, no thigh gravity)
+    const side = probeRows({ ...p, backCheckable: false }, env)
+    expect(side[3].text).toBe('Side view')
+    expect(side[2].detail).not.toMatch(/straight in front/)
+    expect(side[2].detail).toMatch(/faces your side squarely/)
+    const angled = probeRows({ ...p, view: 'angled', backCheckable: false }, env)
+    expect(angled[3].text).toBe('Angled view')
+    expect(angled[2].detail).not.toMatch(/straight in front/)
+    const front = probeRows({ ...p, view: 'front', backCheckable: false }, env)
+    expect(front[2].detail).toMatch(/straight in front/)
+    expect(probeRows(p, env)[3].text).toBe(SIDE_VIEW_GOOD)
+    expect(probeRows({ ...p, view: 'angled' }, env)[3].text).toBe('Angled view')
+  })
   it('the back warning appears only when the back cannot be confirmed', () => {
     expect(backWarning(p, 'none')).toBeNull()
     expect(backWarning({ ...p, hips: 'out', backCheckable: false }, 'none')).toMatch(/^Without your hips in view, .*connect an AI model for one/)
@@ -299,7 +359,9 @@ describe('AI hint and verification badge', () => {
     const r = { label: 'Gemini', model: 'm', verdict: 'good' as const, summary: 's', instructions: [] }
     expect(verificationBadge(ui({ baselineSummary: summary() }))?.text).toBe('Verified by on-device AI')
     expect(verificationBadge(ui({ baselineSummary: summary(), reviewResult: r }))?.text).toBe('Verified by on-device AI and Gemini')
-    expect(verificationBadge(ui({ baselineSummary: summary(), reviewResult: r, unverifiedChecks: ['trunkUpright'] }))?.text).toBe('Verified by Gemini')
+    // the review judged what the on-device judge could not (the session's own list is [] once accepted)
+    expect(verificationBadge({ ...ui({ baselineSummary: summary() }), reviewResult: { ...r, covered: ['trunkUpright'] } })?.text).toBe('Verified by Gemini')
+    expect(verificationBadge({ ...ui({ baselineSummary: summary() }), reviewResult: { ...r, covered: [] } })?.text).toBe('Verified by on-device AI and Gemini')
     expect(verificationBadge(ui({ baselineSummary: summary({ verified: false, forced: true }) }))).toEqual({
       tone: 'amber',
       text: 'Not verified — saved anyway'

@@ -17,7 +17,13 @@ export interface CoachContextInputs {
   paused: boolean
   /** detection is running with a working camera (useMonitoring().live) */
   live: boolean
+  /** a reference posture is saved for the camera in use (posture is judged) */
   calibrated: boolean
+  /**
+   * a reference posture is saved, but with a different camera — posture isn't judged
+   * (`calibrated` is false) yet setup was done; optional for older callers
+   */
+  baselineCameraMismatch?: boolean
   sitting: SittingState | null
   /** getStatsRange(7) — oldest first, the last day is today */
   range: StatsRange | null
@@ -47,17 +53,30 @@ function activeIssues(snapshot: PostureSnapshot, enabled?: Partial<Record<IssueI
     .sort((a, b) => b.stage - a.stage)
 }
 
-export function buildLiveContext(i: CoachContextInputs): AiChatLiveContext | undefined {
+/**
+ * The live block of the chat context; `baselineOtherCamera` keeps the model from saying
+ * "never set up" when setup was done with another camera.
+ */
+export type CoachLiveContext = AiChatLiveContext
+
+/** setup was done, but with a different camera than the one in use */
+const otherCamera = (i: Pick<CoachContextInputs, 'baselineCameraMismatch' | 'baseline'>): boolean =>
+  i.baselineCameraMismatch === true && i.baseline !== null
+
+export function buildLiveContext(i: CoachContextInputs): CoachLiveContext | undefined {
   if (liveUnavailable(i) !== null || !i.snapshot) return undefined
   const s = i.snapshot
-  const live: AiChatLiveContext = { presence: s.presence, calibrated: i.calibrated }
+  const live: CoachLiveContext = { presence: s.presence, calibrated: i.calibrated }
+  if (otherCamera(i)) live.baselineOtherCamera = true
   if (s.presence === 'active') {
     if (s.readout) {
       live.view = s.readout.view
       live.neckFwdDeg = round(s.readout.neckFwd)
       live.trunkFwdDeg = round(s.readout.trunkFwd)
     }
-    if (i.calibrated) {
+    // suspended (the view drifted far from setup): nothing is judged, so no stages are sent —
+    // all-zero stages would read as "posture is fine"
+    if (i.calibrated && s.suspended !== true) {
       const issues: Partial<Record<IssueId, Stage>> = {}
       for (const id of ISSUES) if (i.enabledIssues?.[id] !== false) issues[id] = s.issues[id]?.stage ?? 0
       live.issues = issues
@@ -136,6 +155,7 @@ export function livePreview(i: CoachContextInputs): ContextPreview {
   if (why || !i.snapshot) return { available: false, lines: [why ?? 'Camera off — nothing to share'] }
   const s = i.snapshot
   if (s.presence !== 'active') return { available: true, lines: ['Away from the desk'] }
+  if (!i.calibrated && otherCamera(i)) return { available: true, lines: ['In view · set up with a different camera — not judged'] }
   if (!i.calibrated) return { available: true, lines: ['In view · posture not set up yet'] }
   const act = activeIssues(s, i.enabledIssues)
   const status = act.length === 0 ? 'Aligned' : `${ISSUE_SHORT[act[0].id]} · ${STAGE_LABEL[act[0].stage]}`
@@ -174,7 +194,10 @@ export function baselinePreview(i: CoachContextInputs): ContextPreview {
   if (!b) return { available: false, lines: ['Not set up yet'] }
   return {
     available: true,
-    lines: [`${VIEW_LABEL[b.view.kind]} · ${b.verified ? 'verified' : 'not verified'}`, `Set up ${fmtRelative(b.capturedAt, i.now)}`]
+    lines: [
+      `${VIEW_LABEL[b.view.kind]} · ${b.verified ? 'verified' : 'not verified'}${otherCamera(i) ? ' · other camera' : ''}`,
+      `Set up ${fmtRelative(b.capturedAt, i.now)}`
+    ]
   }
 }
 

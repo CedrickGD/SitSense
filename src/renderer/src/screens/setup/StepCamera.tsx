@@ -72,7 +72,8 @@ function CameraPanel({
   const rows = probeRows(probe, { running, cameraError: cameraError ? CAMERA_ERROR[cameraError] : null })
   const ai = aiSetupState(settings)
   const warning = backWarning(probe, ai)
-  const canStart = !blocked && probe.ready
+  // the camera must be delivering frames right now (a stale 'ready' can't start coaching)
+  const canStart = !blocked && running && probe.ready
 
   // Enter starts coaching (§7.2) — unless focus is on something that handles Enter itself
   useEffect(() => {
@@ -145,9 +146,9 @@ function CameraPanel({
             <Icon name="alert" size={16} className="mt-px shrink-0 text-amber" />
             <div className="flex min-w-0 flex-col items-start gap-1.5">
               <p className="type-caption text-amber">{warning}</p>
-              {ai === 'none' || ai === 'turned-off' ? (
+              {ai === 'none' || ai === 'turned-off' || ai === 'needs-setup' ? (
                 <Button variant="ghost" size="sm" icon="spark" ringOn="setup" className="-ml-2.5" onClick={onOpenAi}>
-                  {ai === 'none' ? 'Connect an AI model' : 'Turn on your AI model'}
+                  {ai === 'none' ? 'Connect an AI model' : ai === 'needs-setup' ? 'Finish AI setup' : 'Turn on your AI model'}
                 </Button>
               ) : ai === 'off-in-setup' ? (
                 <Button

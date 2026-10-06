@@ -5,18 +5,29 @@
 
 import { create } from 'zustand'
 import type { CalibrationBaseline, ViewKind } from '@shared/posture'
-import type { AiReviewMeasurements } from '@shared/ai'
+import type { AiPostureReview, AiReviewMeasurements } from '@shared/ai'
 import { aiUnavailableNote } from '@renderer/ai/helpers'
-import { assessPosture, type CheckId } from '@renderer/posture/assess'
-import { FAIL_MESSAGES, type SetupState } from '@renderer/posture/calibration'
-import type { PostureFeatures } from '@renderer/posture/types'
-import type { BaselineSummary, SetupReviewResult, SetupUiState } from '@renderer/state/store'
+import { INSTRUCTIONS, assessPosture, type CheckId, type PostureAssessment } from '@renderer/posture/assess'
+import { FAIL_MESSAGES, LiveSetupGravity, type SetupState } from '@renderer/posture/calibration'
+import { VIEW_ANGLED_MAX_YAW, VIEW_FRONT_MAX_YAW } from '@renderer/posture/constants'
+import type { Frame, PostureFeatures } from '@renderer/posture/types'
+import { median } from '@renderer/posture/vec'
+import type { BaselineSummary, SetupReviewResult, SetupUiState, SetupViewFix } from '@renderer/state/store'
+
+/** Why the essential checks can't be verified (store.ts SetupViewFix). */
+export type ViewFix = SetupViewFix
+
+/** A setup review verdict, with what the reviewer was asked to judge (`covered`). */
+export type SetupReviewOutcome = SetupReviewResult
+
+/** The setup UI state as this module produces it (store.ts SetupUiState). */
+export type SetupUi = SetupUiState
 
 /** What the controller adds on top of the session's own state. */
 export interface SetupExtras {
   reviewing: { label: string } | null
   reviewNote: string | null
-  reviewResult: SetupReviewResult | null
+  reviewResult: SetupReviewOutcome | null
   baselineSummary: BaselineSummary | null
   saveError: string | null
 }
@@ -32,7 +43,11 @@ export const NO_EXTRAS: SetupExtras = {
 const r2 = (v: number): number => Math.round(Math.min(1, Math.max(0, v)) * 50) / 50
 const r1 = (v: number | null): number | null => (v === null || !Number.isFinite(v) ? null : Math.round(v * 10) / 10)
 
-export function toSetupUi(st: SetupState, x: SetupExtras): SetupUiState {
+/**
+ * `view` is the smoothed camera view (SetupViewTracker); left out, the latest frame's own
+ * (unsmoothed) view is used.
+ */
+export function toSetupUi(st: SetupState, x: SetupExtras, view?: ViewKind | null): SetupUi {
   return {
     phase: st.phase,
     suspended: null,
@@ -43,7 +58,8 @@ export function toSetupUi(st: SetupState, x: SetupExtras): SetupUiState {
       status: c.status,
       instruction: c.instruction
     })),
-    view: st.features?.view.kind ?? null,
+    view: view !== undefined ? view : (st.features?.view.kind ?? null),
+    viewFix: viewFixOf(st.assessment, st.features),
     holdProgress: r2(st.holdProgress),
     captureProgress: r2(st.captureProgress),
     canForce: st.canForce,
@@ -60,6 +76,100 @@ export function toSetupUi(st: SetupState, x: SetupExtras): SetupUiState {
     reviewRejections: st.reviewRejections,
     baselineSummary: st.phase === 'done' ? x.baselineSummary : null,
     saveError: x.saveError
+  }
+}
+
+/** Why the live assessment's essentials can't be verified (see ViewFix). */
+export function viewFixOf(a: PostureAssessment, f: PostureFeatures | null): ViewFix | null {
+  if (a.unverified.length === 0) return null
+  switch (a.viewInstruction) {
+    case INSTRUCTIONS.showHips:
+    case INSTRUCTIONS.showHipsForHead:
+    case INSTRUCTIONS.hipsHidden:
+      return 'hips'
+    case INSTRUCTIONS.backFromFront:
+    case INSTRUCTIONS.backFromAngle:
+      return 'angle'
+    case INSTRUCTIONS.levelCamera:
+      return 'level'
+    case INSTRUCTIONS.sitBackLookAhead:
+      return 'lean'
+    // the neck reads a little past the limit (inside the margin for an imprecise gravity
+    // reference): bringing the head back fixes it, not the camera
+    case INSTRUCTIONS.headForward:
+      return 'head'
+    default:
+      return (f?.vis.hips ?? 0) > 0 ? 'angle' : 'hips'
+  }
+}
+
+/**
+ * A successful setup review as the UI shows it. `reviewing` is the session state the capture
+ * was sent in: its unverifiedChecks are what the reviewer was asked to judge. They are
+ * recorded here because the session clears them on acceptReview().
+ */
+export function reviewOutcome(res: Extract<AiPostureReview, { ok: true }>, reviewing: SetupState | null): SetupReviewOutcome {
+  return {
+    label: res.connectionLabel,
+    model: res.model,
+    verdict: res.verdict,
+    summary: res.summary,
+    instructions: [...res.instructions],
+    covered: [...(reviewing?.unverifiedChecks ?? [])]
+  }
+}
+
+// ───────────────────────────── step 2: the camera view chip ─────────────────────────────
+
+/** a front/angled/side boundary must be crossed by this much before the view changes (deg) */
+export const VIEW_KIND_HYST_DEG = 4
+const VIEW_WINDOW_MS = 2000
+
+const plainViewKind = (yaw: number): ViewKind =>
+  yaw < VIEW_FRONT_MAX_YAW ? 'front' : yaw < VIEW_ANGLED_MAX_YAW ? 'angled' : 'side'
+
+/** The view kind for a (smoothed) yaw: stays `cur` unless a boundary is clearly crossed. */
+export function nextViewKind(cur: ViewKind | null, yaw: number): ViewKind {
+  const h = VIEW_KIND_HYST_DEG
+  switch (cur) {
+    case 'front':
+      return yaw >= VIEW_ANGLED_MAX_YAW ? 'side' : yaw >= VIEW_FRONT_MAX_YAW + h ? 'angled' : 'front'
+    case 'angled':
+      return yaw < VIEW_FRONT_MAX_YAW - h ? 'front' : yaw >= VIEW_ANGLED_MAX_YAW + h ? 'side' : 'angled'
+    case 'side':
+      return yaw < VIEW_FRONT_MAX_YAW ? 'front' : yaw < VIEW_ANGLED_MAX_YAW - h ? 'angled' : 'side'
+    default:
+      return plainViewKind(yaw)
+  }
+}
+
+/**
+ * Step 2's camera view: the median yaw of the last two seconds of frames, with hysteresis at the
+ * front/angled/side boundaries (a single frame's kind flickers for a camera near 25° or
+ * 60°). null while the user is not in view. Driven by the session's states.
+ */
+export class SetupViewTracker {
+  private yaws: Array<{ t: number; yaw: number }> = []
+  private kind: ViewKind | null = null
+
+  reset(): void {
+    this.yaws = []
+    this.kind = null
+  }
+
+  push(st: SetupState, t: number): ViewKind | null {
+    if (st.assessment.byId.inView.status !== 'good') {
+      this.reset()
+      return null
+    }
+    if (st.features) this.yaws.push({ t, yaw: st.features.view.yawDeg })
+    while (this.yaws.length > 0 && t - this.yaws[0].t > VIEW_WINDOW_MS) this.yaws.shift()
+    if (this.yaws.length > 0) this.kind = nextViewKind(this.kind, median(this.yaws.map((y) => y.yaw)))
+    return this.kind
+  }
+
+  get view(): ViewKind | null {
+    return this.kind
   }
 }
 
@@ -142,8 +252,9 @@ export interface SetupProbeState {
    */
   hips: 'seen' | 'hidden' | 'out' | null
   /**
-   * The on-device judge can verify the back angle from this view (assess.ts `unverified`
-   * does not list trunkUpright); null while not in view.
+   * This camera view lets the on-device judge verify the back angle (assess.ts `unverified`
+   * does not list trunkUpright, or only because two readings disagree — a posture matter
+   * that sitting back fixes, not the camera); null while not in view.
    */
   backCheckable: boolean | null
 }
@@ -176,9 +287,20 @@ interface ProbeSample {
 function sampleOf(f: PostureFeatures | null, t: number): ProbeSample {
   if (!f) return { t, view: null, hips: null, back: null }
   const hips: HipsSeen = f.vis.hips > 0 ? 'seen' : (f.vis.hipsInFrame ?? 0) > 0 ? 'hidden' : 'out'
-  const back = !assessPosture(f).unverified.includes('trunkUpright')
-  return { t, view: f.view.kind, hips, back }
+  return { t, view: f.view.kind, hips, back: viewAllowsBackCheck(assessPosture(f)) }
 }
+
+/**
+ * Whether this camera VIEW lets the on-device judge verify the back angle. A back left
+ * unverified only because two readings disagree (as when leaning in) is the posture's doing:
+ * sitting back fixes it, not moving the camera.
+ */
+export function viewAllowsBackCheck(a: Pick<PostureAssessment, 'unverified' | 'byId'>): boolean {
+  return !a.unverified.includes('trunkUpright') || a.byId.trunkUpright.viewInstruction === INSTRUCTIONS.sitBackLookAhead
+}
+
+/** Step 1 measures like the setup session (moved to posture/calibration.ts; re-exported for callers). */
+export { LiveSetupGravity }
 
 function mode<T>(items: readonly T[]): T | null {
   const counts = new Map<T, number>()
@@ -196,18 +318,25 @@ function mode<T>(items: readonly T[]): T | null {
   return best
 }
 
-/** Smooths per-frame features into SetupProbeState. Pure: driven by (features, tMs). */
+/**
+ * Measures each frame the way the setup session will (LiveSetupGravity) and smooths it into
+ * SetupProbeState. Pure: driven by (frame, tMs).
+ */
 export class SetupProbe {
   private samples: ProbeSample[] = []
   private inViewSince: number | null = null
+  private readonly gravity = new LiveSetupGravity()
 
   reset(): void {
     this.samples = []
     this.inViewSince = null
+    this.gravity.reset()
   }
 
-  /** One processed frame: its features (null = the head and a shoulder were not found). */
-  push(f: PostureFeatures | null, t: number): SetupProbeState {
+  /** One processed frame (null = no person found). */
+  push(frame: Frame, t: number): SetupProbeState {
+    this.gravity.push(frame)
+    const f = frame ? this.gravity.extract(frame) : null
     this.samples.push(sampleOf(f, t))
     while (this.samples.length > 0 && t - this.samples[0].t > PROBE_WINDOW_MS) this.samples.shift()
     return this.state(t)

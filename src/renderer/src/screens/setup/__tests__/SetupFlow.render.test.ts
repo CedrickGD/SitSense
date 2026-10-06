@@ -28,6 +28,7 @@ vi.mock('@renderer/components/CameraFeed', () => ({ default: () => null }))
 vi.mock('@renderer/components/AiModelsSection', () => ({ default: () => null }))
 
 const { IDLE_SETUP } = await import('@renderer/state/store')
+const { REVIEW_MAX_AUTO } = await import('@renderer/posture/constants')
 const { IDLE_PROBE } = await import('@renderer/detection/setup-ui')
 const { default: SetupFlow } = await import('../SetupFlow')
 
@@ -212,13 +213,16 @@ describe('SetupFlow', () => {
       expect(html).toContain('Suggested by Google Gemini')
     })
 
-    it('rejected twice: the model still sees a problem, saving is on hold, Start over', () => {
+    it('rejected REVIEW_MAX_AUTO times: the model still sees a problem, saving is on hold, Start over', () => {
       const reviewResult = { label: 'Google Gemini', model: 'gemini-x', verdict: 'adjust' as const, summary: 'Slumped.', instructions: ['Sit up tall.'] }
-      const html = render(2, { phase: 'coaching', autoCapture: false, reviewResult, reviewRejections: 2, checks: checks() })
+      const html = render(2, { phase: 'coaching', autoCapture: false, reviewResult, reviewRejections: REVIEW_MAX_AUTO, checks: checks() })
       expect(html).toContain('Google Gemini still sees a problem')
       expect(html).toContain('Sit up tall.')
       expect(html).not.toContain('gemini-x still sees')
       expect(html).toContain('Saving is on hold')
+      // the count the hold actually takes, not "twice"
+      expect(html).toContain(`Google Gemini turned this posture down ${REVIEW_MAX_AUTO} times.`)
+      expect(html).not.toContain('twice')
       expect(html).toContain('Start over')
     })
 

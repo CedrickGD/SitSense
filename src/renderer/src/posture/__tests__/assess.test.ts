@@ -230,16 +230,55 @@ describe('assessPosture — the head on the trunk (gravity-free)', () => {
     // the head is verified on the trunk
     expect(a.byId.headOverShoulders).toMatchObject({ status: 'good', basis: 'relative' })
   })
+
+  it('names the view it cannot judge the back from: straight in front, or this (angled) camera angle', () => {
+    for (const yaw of [30, 50, 65, 74]) {
+      const view = { yawDeg: yaw, elevationDeg: 10, kind: (yaw < 60 ? 'angled' : 'side') as 'angled' | 'side', opticalYawDeg: yaw }
+      const a = assessPosture(feat({ ...weak, view }))
+      expect(a.viewInstruction).toBe(INSTRUCTIONS.backFromAngle)
+      expect(a.viewInstruction).not.toMatch(/straight in front/)
+    }
+  })
+
+  it('without the hips in view, only promises a back check that showing them would make possible', () => {
+    const noHips = (over: Partial<PostureFeatures> = {}): PostureFeatures => {
+      const f = feat({ upSource: 'camera', trunkFwd: null, trunkLat: null, torsoLen: null, neckOnTrunk: null, headOnTrunk: null, ...over })
+      return { ...f, vis: { ...f.vis, hips: 0, hipsInFrame: 0, knees: 0 } }
+    }
+    // a frontal camera without thigh gravity: the hips would make the head checkable, not the back
+    const front = assessPosture(noHips())
+    expect(front.unverified).toEqual(['trunkUpright', 'headOverShoulders'])
+    expect(front.byId.trunkUpright.viewInstruction).toBe(INSTRUCTIONS.backFromFront)
+    expect(front.byId.headOverShoulders.viewInstruction).toBe(INSTRUCTIONS.showHipsForHead)
+    expect(front.checks.map((c) => c.viewInstruction)).not.toContain(INSTRUCTIONS.showHips)
+    // a near-profile camera: with the hips the back is checkable, so it asks for them
+    const side = assessPosture(noHips({ view: { yawDeg: 85, elevationDeg: 0, kind: 'side', opticalYawDeg: 85 } }))
+    expect(side.viewInstruction).toBe(INSTRUCTIONS.showHips)
+    // knees in view (thigh gravity once the hips show too): it asks for them
+    const knees = noHips()
+    expect(assessPosture({ ...knees, vis: { ...knees.vis, knees: 2 } }).viewInstruction).toBe(INSTRUCTIONS.showHips)
+  })
 })
 
 describe('assessPosture — gravity confidence', () => {
-  it('thigh gravity allows for the thigh slope (×1.3: 15.6° trunk, 26° neck)', () => {
+  it('thigh gravity allows for the thigh slope (×1.3: 15.6° trunk, 26° neck) — in coaching, never in confirming', () => {
     // (the head goes along with the trunk, as with thighs that slope: the head on the trunk stays as when upright)
-    expect(assessPosture(feat({ trunkFwd: 15, headPitch: 29 })).byId.trunkUpright.status).toBe('good')
+    expect(assessPosture(feat({ trunkFwd: 12, headPitch: 26 })).byId.trunkUpright.status).toBe('good')
+    expect(assessPosture(feat({ neckFwd: 20 })).byId.headOverShoulders.status).toBe('good')
+    // past the ergonomic limit but within the thigh-slope allowance: not coached, not confirmed
+    // (a slumped user on a seat whose knees point down reads up to 10° too upright)
+    const trunk = assessPosture(feat({ trunkFwd: 15, headPitch: 29 }))
+    expect(trunk.byId.trunkUpright).toMatchObject({ status: 'unknown', viewInstruction: INSTRUCTIONS.sitBackLookAhead })
+    expect(trunk).toMatchObject({ allGood: true, verified: false, unverified: ['trunkUpright'] })
+    const head = assessPosture(feat({ neckFwd: 25 }))
+    expect(head.byId.headOverShoulders).toMatchObject({ status: 'unknown', viewInstruction: INSTRUCTIONS.headForward })
+    expect(head).toMatchObject({ allGood: true, verified: false, unverified: ['headOverShoulders'] })
+    // past the allowance: coached
     expect(assessPosture(feat({ trunkFwd: 17, headPitch: 31 })).byId.trunkUpright.status).toBe('adjust')
-    expect(assessPosture(feat({ neckFwd: 25 })).byId.headOverShoulders.status).toBe('good')
     expect(assessPosture(feat({ neckFwd: 27 })).byId.headOverShoulders.status).toBe('adjust')
     expect(assessPosture(feat()).unverified).toEqual([])
+    // the hold's slack (hysteresis) widens the confirmed band as it widens every tolerance
+    expect(assessPosture(feat({ trunkFwd: 14, headPitch: 28 }), undefined, { slack: 1.2 }).byId.trunkUpright.status).toBe('good')
   })
 
   it('without thigh gravity in a frontal view the trunk is not judged and the head is judged relative to the trunk', () => {
@@ -256,10 +295,38 @@ describe('assessPosture — gravity confidence', () => {
     expect(assessPosture(feat({ upSource: 'hips', trunkFwd: 30, neckFwd: 60 })).byId.headOverShoulders.status).toBe('adjust')
   })
 
-  it('a near-profile view judges the trunk even without thigh gravity (tolerance ×1.3)', () => {
+  it('a near-profile view judges the trunk even without thigh gravity (coached past ×1.3, confirmed up to ×1)', () => {
     const side = { upSource: 'camera' as const, view: { yawDeg: 85, elevationDeg: 0, kind: 'side' as const, opticalYawDeg: 85 } }
-    expect(assessPosture(feat({ ...side, trunkFwd: 15, headPitch: 29 })).byId.trunkUpright.status).toBe('good')
+    expect(assessPosture(feat({ ...side, trunkFwd: 11, headPitch: 25 })).byId.trunkUpright.status).toBe('good')
+    // a camera rolled a few degrees maps onto the trunk angle here: the allowance is not confirmed
+    expect(assessPosture(feat({ ...side, trunkFwd: 15, headPitch: 29 })).byId.trunkUpright.status).toBe('unknown')
     expect(assessPosture(feat({ ...side, trunkFwd: 17, headPitch: 31 })).byId.trunkUpright.status).toBe('adjust')
+  })
+
+  it('near-profile is a yaw from SIDE_VIEW_YAW on, or from sideYawMin (the hold hysteresis)', () => {
+    const at = (yaw: number) => ({ upSource: 'camera' as const, view: { yawDeg: yaw, elevationDeg: 0, kind: 'side' as const, opticalYawDeg: yaw } })
+    expect(assessPosture(feat(at(76))).byId.trunkUpright.status).toBe('good')
+    expect(assessPosture(feat(at(72))).byId.trunkUpright.status).toBe('unknown')
+    expect(assessPosture(feat(at(72)), undefined, { sideYawMin: 70 }).byId.trunkUpright.status).toBe('good')
+    expect(assessPosture(feat(at(68)), undefined, { sideYawMin: 70 }).byId.trunkUpright.status).toBe('unknown')
+  })
+
+  it('a hip line that contradicts a level camera leaves the absolute back and neck angles unconfirmed', () => {
+    for (const upSource of ['body', 'camera'] as const) {
+      const view = upSource === 'camera' ? { view: { yawDeg: 85, elevationDeg: 0, kind: 'side' as const, opticalYawDeg: 85 } } : {}
+      const a = assessPosture(feat({ upSource, ...view }), undefined, { levelUnconfirmed: true })
+      expect(a.byId.trunkUpright).toMatchObject({ status: 'unknown', viewInstruction: INSTRUCTIONS.levelCamera })
+      expect(a.byId.headOverShoulders).toMatchObject({ status: 'unknown', viewInstruction: INSTRUCTIONS.levelCamera })
+      expect(a).toMatchObject({ allGood: true, verified: false, unverified: ['trunkUpright', 'headOverShoulders'] })
+      // a reading past the allowance is still coached
+      expect(assessPosture(feat({ upSource, ...view, trunkFwd: 25, headPitch: 39 }), undefined, { levelUnconfirmed: true }).byId.trunkUpright.status).toBe('adjust')
+    }
+  })
+
+  it('an upright trunk reading with the head far forward on it (as when lying back) is not confirmed', () => {
+    const a = assessPosture(feat({ trunkFwd: 0, neckFwd: 10, headPitch: 55, neckOnTrunk: 18, headOnTrunk: 52 }))
+    expect(a.byId.trunkUpright).toMatchObject({ status: 'unknown', viewInstruction: INSTRUCTIONS.sitBackLookAhead })
+    expect(a.verified).toBe(false)
   })
 
   it('camera-only gravity without a visible trunk: only a neck past any plausible camera tilt (×1.6) is called out', () => {

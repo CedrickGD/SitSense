@@ -135,9 +135,9 @@ A hard kill (Task Manager, crash) still loses the current stats minute and an un
 
 ### Stats history and break reminders *(current: `main/stats.ts`, `main/breaks.ts`, `main/break-tracker.ts`, `shared/stats.ts`)*
 
-- Day files `userData/stats/YYYY-MM-DD.json` are `{ date, minutes, alerts?, breaks? }`. `alerts` counts posture nudges actually shown (`fireAlert()` returns true, and `ipc.ts` then calls `statsRecordAlert()`). `breaks` counts the breaks the tracker confirms. The midnight rollover also runs when a count arrives before the next sample.
+- Day files `userData/stats/YYYY-MM-DD.json` are `{ date, minutes, alerts?, breaks? }`. Files older than 90 days are pruned at start and at every day change. An unreadable day file (locked) is retried once, then tracking continues in memory without overwriting it, and the next readable save merges both; a file that won't parse is renamed to `.corrupt-<time>` first (never overwritten if that fails); a BOM is tolerated. A day change (midnight, or the clock set back) loads and continues the new date's file instead of overwriting it. A minute while detection is suspended (view changed since setup) is counted as `paused`, never good. `alerts` counts posture nudges actually shown (`fireAlert()` returns true, and `ipc.ts` then calls `statsRecordAlert()`). `breaks` counts the breaks the tracker confirms. The midnight rollover also runs when a count arrives before the next sample.
 - `getStatsRange(days)` summarizes each local day (`summarizeDay`). It returns tracked, good, away and paused minutes; minutes per issue and per stage; first and last active minute; 24 hourly good/bad buckets; alerts; and breaks. Days with no file are empty entries (`hasData: false`). Today comes from memory, including the minute in progress. Summaries of past days are cached. The streak (`computeStreak`) counts consecutive days with ≥ 70 % of ≥ 30 tracked minutes aligned; an unfinished today never breaks it.
-- Break reminders (`settings.breaks = { enabled, intervalMinutes 20–120, default 50 }`). Main counts the user as sitting when a posture snapshot from the last 15 s says `presence: 'active'` and monitoring is not paused. Being away, paused or not detecting for ≥ 3 min ends the stretch. Shorter absences don't, and a gap of ≥ 3 min between ticks (sleep) does. A break counts when the stretch it ends lasted ≥ 20 min. While the user is sitting, the reminder toast fires when the interval is reached: "Time to stand up — you've been sitting for N min…", with a **Snooze 10 min** action. An ignored reminder repeats every 15 min, and a snooze replaces that repeat. No toast is shown while paused.
+- Break reminders (`settings.breaks = { enabled, intervalMinutes 20–120, default 50 }`). Main counts the user as sitting when a posture snapshot from the last 15 s says `presence: 'active'`, monitoring is not paused **and posture setup has been saved** (no reminders before setup, ui-v3 §6). The engine starts AWAY, so an empty chair at launch never opens a stretch. Being away, paused or not detecting for ≥ 3 min (`BREAK_AWAY_MINUTES`, shared/ipc.ts — the value every screen quotes) ends the stretch. Shorter absences don't, and a gap of ≥ 3 min between ticks (sleep) does. A break counts when the stretch it ends lasted ≥ 3 min (filters a passer-by). While the user is sitting, the reminder toast fires when the interval is reached: "Time to stand up — you've been sitting for N min…", with a **Snooze 10 min** action. An ignored reminder repeats every 15 min, and a snooze replaces that repeat. No toast is shown while paused.
 
 ### Settings persistence (`main/settings-store.ts`) *(current)*
 
@@ -322,6 +322,8 @@ Single source of truth: the `IPC` channel constants and the `SitSenseApi` interf
 | invoke | `ai:save-connection`, `ai:remove-connection`, `ai:move-connection` | → `Settings` (rejects with a short message on invalid input) |
 | invoke | `ai:test-connection` / `ai:list-models` / `ai:review-posture` | → `AiTestResult` / `AiModelList` / `AiPostureReview` |
 | invoke | `ai:chat` | `AiChatRequest` → `AiChatReply` (coach chat, never rejects; ai-providers.md §7) |
+| invoke | `ai:chat-cancel` | aborts the running coach chat (Stop / Clear chat) |
+| invoke | `ai:cancel-review` | `requestId` → aborts that posture review and frees main's single review slot |
 | invoke | `stats:get-range` | `days` (finite number, rounded and clamped to 1..90; anything else rejects) → `StatsRange` (`{ days: DaySummary[]; streak: StreakInfo }`, oldest first, `shared/stats.ts`) |
 | invoke | `breaks:snooze` | `minutes?` (default 10, clamped to 1..120) → `SittingState` |
 | invoke | `update:get-state` | → `UpdateStatus` (`currentVersion`, `mode`, `state`, `lastCheckedAt`; §2 "App updates") |
@@ -332,6 +334,7 @@ Single source of truth: the `IPC` channel constants and the `SitSenseApi` interf
 | send | `alert:fire` | `PostureAlert` → toast (filtered by settings) |
 | send | `detection:status` | `DetectionStatus` |
 | main → renderer | `settings:changed`, `pause:changed`, `control:calibrate`, `control:navigate`, `system:resumed`, `window:visibility` | |
+| main → renderer | `window:closed-to-tray` | the close button hid the window (not a minimize): the renderer leaves an open posture setup |
 | main → renderer | `breaks:sitting` | `SittingState` (`onSittingChanged`; sent when the minute count or break/reminder state changes). Also in `AppStatus.sitting` |
 | main → renderer | `update:state` | `UpdateStatus` on every change (`onUpdateState`); the renderer drops anything `isUpdateStatus()` rejects |
 
@@ -366,7 +369,7 @@ nsis:
   createStartMenuShortcut: true        # REQUIRED for reliable toasts (AUMID shortcut)
   createDesktopShortcut: true
   runAfterFinish: true
-  include: build/installer.nsh         # (current) a real uninstall removes the HKCU Run autostart value
+  include: build/installer.nsh         # (current) a real uninstall removes the HKCU Run autostart value and %LOCALAPPDATA%\sitsense-updater (the cached update installer)
 portable:
   artifactName: SitSense-portable-${version}.exe
 npmRebuild: false                      # no native deps — keep it that way

@@ -145,6 +145,8 @@ export function registerIpc(): void {
   handle(IPC.aiListModels, (_e, id: unknown) => ai.listModels(id))
   handle(IPC.aiReviewPosture, (_e, req: unknown) => ai.reviewPosture(req))
   handle(IPC.aiChat, (_e, req: unknown) => ai.chat(req))
+  handle(IPC.aiChatCancel, () => ai.cancelChat())
+  handle(IPC.aiCancelReview, (_e, requestId: unknown) => ai.cancelReview(requestId))
 
   handle(IPC.appGetStatus, (): AppStatus => {
     return {

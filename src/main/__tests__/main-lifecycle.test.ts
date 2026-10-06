@@ -16,7 +16,8 @@ const h = vi.hoisted(() => {
   const readyP = new Promise<void>((r) => (ready = r))
   const state = { lock: true, loadIssue: null as unknown }
   const toasts: { title: string; body: string }[] = []
-  return { order, calls, appHandlers, winHandlers, powerHandlers, add, readyP, release: () => ready(), state, toasts }
+  const autostartOpts: unknown[] = []
+  return { order, calls, appHandlers, winHandlers, powerHandlers, add, readyP, release: () => ready(), state, toasts, autostartOpts }
 })
 
 vi.mock('../dev-profile', () => {
@@ -48,7 +49,7 @@ vi.mock('electron', () => {
   }
 })
 vi.mock('../app-protocol', () => ({ registerAppScheme: () => {}, handleAppProtocol: () => {} }))
-vi.mock('../autostart', () => ({ applyAutostart: () => {} }))
+vi.mock('../autostart', () => ({ applyAutostart: (_s: unknown, opts: unknown) => h.autostartOpts.push(opts) }))
 vi.mock('../ipc', () => ({ registerIpc: () => {} }))
 vi.mock('../breaks', () => ({ initBreaks: () => h.calls.push('initBreaks') }))
 vi.mock('../notifications', () => ({ trayHint: () => {} }))
@@ -110,6 +111,10 @@ describe('main process lifecycle (index.ts)', () => {
     expect(h.toasts).toHaveLength(1)
     expect(h.toasts[0]!.title).toMatch(/reset/)
     expect(h.toasts[0]!.body).toContain('settings.json.corrupt-2026-10-02T08-00-00-000Z')
+  })
+
+  it('boot autostart reconcile is untrusted after a defaults fallback (never deletes the entry)', () => {
+    expect(h.autostartOpts).toEqual([{ trusted: false }])
   })
 
   it('has toast copy for every settings load issue and none for a clean load', async () => {

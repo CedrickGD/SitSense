@@ -8,6 +8,7 @@ import { detectionController } from '@renderer/detection/controller'
 import { Icon } from '@renderer/components/icons'
 import { Button, Chip } from '@renderer/components/primitives'
 import { plural } from '@renderer/lib/format'
+import { REVIEW_MAX_AUTO } from '@renderer/posture/constants'
 import { useWindowHeight, type Breakpoint } from '@renderer/lib/hooks'
 import { useAppStore, type SetupUiState } from '@renderer/state/store'
 import {
@@ -283,7 +284,7 @@ function Progress({ setup, compact }: { setup: SetupUiState; compact: boolean })
     note = 'Stay still for a moment longer.'
   } else if (!setup.autoCapture) {
     label = 'Saving is on hold'
-    note = `${setup.reviewResult?.label ?? 'Your AI model'} turned this posture down twice. Change what it asks, then start over.`
+    note = `${setup.reviewResult?.label ?? 'Your AI model'} turned this posture down ${plural(REVIEW_MAX_AUTO, 'time')}. Change what it asks, then start over.`
   } else if (unverified.length > 0 && ai === 'on') {
     label = 'Waiting for a good posture'
     note = `Once everything visible checks out, ${aiLabel(settings) ?? 'your AI model'} double-checks the rest.`
@@ -424,7 +425,7 @@ function TargetCard({ compact }: { compact: boolean }): JSX.Element {
             <span className="inline-flex items-center gap-1.5">
               <span className="h-[3px] w-4 rounded-full bg-sage" /> good posture
             </span>
-            {settled && settled !== 'hips' && settled !== 'side' && (
+            {settled && settled !== 'hips' && settled !== 'verify' && settled !== 'side' && (
               <span className="inline-flex items-center gap-1.5">
                 <span className="w-4 border-t-2 border-dashed border-amber" /> you now
               </span>

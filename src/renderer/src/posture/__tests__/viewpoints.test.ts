@@ -719,3 +719,114 @@ describe('off-centre user near the frame edge, wide FOV (viewing-ray correction)
     expect(alerts.some((a) => a.issue === 'headForward')).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// cameras at the near-profile limit: the side-view verdict has hysteresis
+
+describe('cameras at the near-profile limit (optical yaw around SIDE_VIEW_YAW)', () => {
+  const at = (azimuth: number, elevation: number): Viewpoint => ({
+    azimuth,
+    elevation,
+    distance: 1,
+    roll: 0,
+    hfov: 70,
+    aspect: 16 / 9,
+    name: `az${azimuth} el${elevation}`
+  })
+  const VIEWS = [-78, -76, -74, -72, 72, 74, 76, 78].flatMap((az) => [0, 15, 30].map((el) => at(az, el)))
+  const upright = posture({ headPitch: -5 })
+
+  it.each(VIEWS)('$name: no hold → capture → discard loop, and no "straight in front"', (vp) => {
+    for (const seed of [1, 2]) {
+      const sim = new PoseSim(vp, { seed: OFF + seed })
+      // the hips are in the picture: the trunk is measured, its lean judged where near-profile
+      expect(sim.render(upright).image[23].visibility! + sim.render(upright).image[24].visibility!).toBeGreaterThan(0)
+      const session = new SetupSession({ now: () => 0 })
+      let st = session.state
+      let holds = 0
+      let discarded = 0
+      let prev = ''
+      for (let t = 0; t < 40_000 && st.phase !== 'done'; t += STEP_MS) {
+        st = session.push(sim.render(upright), t)
+        if (st.phase === 'holding' && prev !== 'holding' && prev !== 'capturing') holds++
+        // a capture that went back to coaching (the final exam or a break) was thrown away
+        if (prev === 'capturing' && st.phase === 'coaching') discarded++
+        prev = st.phase
+        // the camera is at the user's side: never "from straight in front"
+        expect(st.instruction ?? '').not.toMatch(/straight in front/)
+      }
+      const res = { vp: vp.name, seed, holds: holds <= 2, discarded: discarded <= 1 }
+      expect(res).toEqual({ vp: vp.name, seed, holds: true, discarded: true })
+      if (Math.abs(vp.azimuth) >= 76) {
+        // clearly near-profile: verified and saved by the local judge
+        expect({ vp: vp.name, seed, phase: st.phase, verified: st.baseline?.verified }).toEqual({ vp: vp.name, seed, phase: 'done', verified: true })
+      } else if (st.phase !== 'done') {
+        // not near-profile enough: it waits (says why, offers "save anyway") instead of looping
+        expect({ vp: vp.name, seed, phase: st.phase, needs: st.needsVerification, force: st.canForce }).toEqual({
+          vp: vp.name,
+          seed,
+          phase: 'coaching',
+          needs: true,
+          force: true
+        })
+        expect(st.instruction).toBe(INSTRUCTIONS.backFromAngle)
+      }
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// the view instructions say what the camera can and cannot do
+
+describe('view instructions match the camera', () => {
+  /** knees under the desk: no thigh gravity */
+  class NoKnees extends PoseSim {
+    render(q: PostureParams): ReturnType<PoseSim['render']> {
+      const fr = super.render(q)
+      return { ...fr, image: fr.image.map((l, i) => (i === 25 || i === 26 ? { ...l, visibility: 0.1 } : l)) }
+    }
+  }
+  const instructionsOf = (sim: PoseSim, ms = 12_000): { instructions: Set<string>; views: Set<string>; st: ReturnType<SetupSession['push']> } => {
+    const session = new SetupSession({ now: () => 0 })
+    const instructions = new Set<string>()
+    const views = new Set<string>()
+    let st = session.state
+    for (let t = 0; t < ms; t += STEP_MS) {
+      st = session.push(sim.render(good), t)
+      if (st.instruction) instructions.add(st.instruction)
+      for (const c of st.assessment.checks) if (c.viewInstruction) views.add(c.viewInstruction)
+    }
+    return { instructions, views, st }
+  }
+
+  it.each([-65, -50, 50, 65])('an angled camera (az %d°) without thigh gravity: "from this camera angle", not "straight in front"', (azimuth) => {
+    const sim = new NoKnees({ azimuth, elevation: 10, distance: 1.2, roll: 0, hfov: 70, aspect: 16 / 9 }, { seed: OFF + 61 })
+    const { instructions, views, st } = instructionsOf(sim)
+    expect(st.needsVerification).toBe(true)
+    expect(st.instruction).toBe(INSTRUCTIONS.backFromAngle)
+    for (const s of [...instructions, ...views]) expect(s).not.toMatch(/straight in front/)
+  })
+
+  it('a frontal camera without the hips or knees in view never promises a back check for showing the hips', () => {
+    const cam = { azimuth: 0, elevation: 5, distance: 0.6, roll: 0, hfov: 60, aspect: 4 / 3, aim: [0, 0.6, 0] as Vec3 }
+    const clean = new NoKnees(cam, { noise: NO_NOISE }).render(good)
+    // the hips are outside the picture
+    expect(clean.image[23].y > 1 && clean.image[24].y > 1).toBe(true)
+    const { instructions, views, st } = instructionsOf(new NoKnees(cam, { seed: OFF + 62 }))
+    expect(st.assessment.byId.trunkUpright.status).toBe('unknown')
+    expect([...instructions, ...views]).not.toContain(INSTRUCTIONS.showHips)
+    expect(st.assessment.byId.trunkUpright.viewInstruction).toBe(INSTRUCTIONS.backFromFront)
+    // what the hips WOULD make checkable here: the head on the trunk
+    if (st.assessment.unverified.includes('headOverShoulders')) {
+      expect(st.assessment.byId.headOverShoulders.viewInstruction).toBe(INSTRUCTIONS.showHipsForHead)
+    }
+  })
+
+  it('a near-profile camera without the hips in view asks for them (the back is checkable with them)', () => {
+    const cam = { azimuth: 90, elevation: 5, distance: 0.6, roll: 0, hfov: 60, aspect: 4 / 3, aim: [0, 0.6, 0] as Vec3 }
+    const clean = new PoseSim(cam, { noise: NO_NOISE }).render(good)
+    expect(clean.image[23].y > 1 && clean.image[24].y > 1).toBe(true)
+    const { st } = instructionsOf(new PoseSim(cam, { seed: OFF + 63 }))
+    expect(st.assessment.byId.trunkUpright.viewInstruction).toBe(INSTRUCTIONS.showHips)
+  })
+})

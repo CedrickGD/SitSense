@@ -184,6 +184,11 @@ export interface AiReviewRequest {
   imageJpegB64: string
   share: AiShareMode
   measurements: AiReviewMeasurements
+  /**
+   * the renderer's name for this review (letters, digits, '-', '_'; ≤ 64), so it can free
+   * main's single review slot with aiCancelReview() when it abandons it. Optional.
+   */
+  requestId?: string
 }
 
 export type AiPostureReview =
@@ -276,6 +281,11 @@ export interface AiChatMessage {
 export interface AiChatLiveContext {
   presence?: PresenceState
   calibrated?: boolean
+  /**
+   * a reference posture exists but was saved with a different camera, so posture is not
+   * judged (`calibrated` stays false) — not "never set up"
+   */
+  baselineOtherCamera?: boolean
   view?: ViewKind
   neckFwdDeg?: number | null
   trunkFwdDeg?: number | null
@@ -356,5 +366,17 @@ export type AiChatReply =
       reply: string
       connectionLabel: string
       model: string
+      /** the connection that answered */
+      connectionId?: string
+      /** the connection that failed first when a fallback answered (null/absent = the first one asked answered) */
+      fallbackFrom?: string | null
     }
-  | { ok: false; message: string }
+  | {
+      ok: false
+      message: string
+      /**
+       * every connection was asked and failed (a provider / key / model problem worth
+       * "check Settings → AI models"); absent for validation, AI off, paused, interrupted
+       */
+      fromModel?: true
+    }

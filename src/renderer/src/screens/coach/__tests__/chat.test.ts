@@ -8,6 +8,7 @@ import {
   newMessageId,
   PROMPT_POOL,
   relativeDay,
+  replyRow,
   SEND_MESSAGE_CHARS,
   suggestedPrompts,
   toAiMessages,
@@ -182,5 +183,22 @@ describe('greetingText', () => {
     expect(greetingText(on, { live: no, today: no, baseline: no }, true)).toBe(
       'Hi! Ask me anything about your posture, your desk or a stretch — or press *Check my posture now*.'
     )
+  })
+})
+
+describe('replyRow', () => {
+  it('takes the fallback note from main, not from comparing labels', () => {
+    // two connections with the same label: main still says a fallback answered
+    const fb = replyRow({ ok: true, reply: 'Sit back.', connectionLabel: 'Google Gemini', model: 'g', connectionId: 'b', fallbackFrom: 'Google Gemini (#1)' } as never)
+    expect(fb).toEqual({ kind: 'text', text: 'Sit back.', meta: { label: 'Google Gemini', model: 'g', fallbackFrom: 'Google Gemini (#1)' } })
+    expect(replyRow({ ok: true, reply: 'x', connectionLabel: 'A', model: 'm', connectionId: 'a', fallbackFrom: null } as never)).toMatchObject({ meta: { fallbackFrom: null } })
+    expect(replyRow({ ok: true, reply: 'x', connectionLabel: 'A', model: 'm' })).toMatchObject({ meta: { fallbackFrom: null } })
+  })
+
+  it('points to AI settings only for failures that came from the providers', () => {
+    expect(replyRow({ ok: false, message: 'All AI connections failed — …', fromModel: true } as never)).toEqual({ kind: 'error', text: 'All AI connections failed — …', fromModel: true })
+    // interrupted, paused, validation and "AI off" replies are not the model's fault
+    expect(replyRow({ ok: false, message: 'The coach was interrupted.' })).toEqual({ kind: 'error', text: 'The coach was interrupted.', fromModel: false })
+    expect(replyRow({ ok: false, message: 'Monitoring is paused.' })).toMatchObject({ fromModel: false })
   })
 })

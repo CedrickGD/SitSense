@@ -282,6 +282,95 @@ describe('aiTestConnection / aiListModels guards', () => {
     svc.cancelAll()
     expect(await p).toEqual({ ok: false, message: 'Cancelled.' })
   })
+
+  it('a test of a replaced key that finishes late does not overwrite the new key’s result', async () => {
+    let release: (() => void) | null = null
+    const gate = new Promise<void>((r) => (release = r))
+    const okModels = { body: { object: 'list', data: [{ id: 'gpt-x' }] } }
+    const ks = makeKeyStore(fakeBackend())
+    const holder = settingsHolder(ks.keys, { ai: { enabled: true } })
+    // the old key's request waits on the gate, then is rejected; the new key's passes
+    const f = async (_url: string, init?: RequestInit): Promise<Response> => {
+      const auth = String((init?.headers as Record<string, string>)?.authorization ?? '')
+      if (auth.includes(FAKE_KEYS.openai)) {
+        await gate
+        return new Response(JSON.stringify({ error: { message: 'Incorrect API key provided', code: 'invalid_api_key' } }), { status: 401 })
+      }
+      return new Response(JSON.stringify(okModels.body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    const svc = createAiService({
+      getSettings: holder.get,
+      updateSettings: holder.update,
+      broadcast: holder.broadcast,
+      keys: ks.keys,
+      fetch: f,
+      newId: () => 'id-1',
+      isPaused: () => false,
+      timeoutMs: 2000
+    })
+    svc.saveConnection({ kind: 'openai' }, FAKE_KEYS.openai)
+    const oldTest = svc.testConnection('id-1')
+    await new Promise((r) => setTimeout(r, 5))
+    svc.saveConnection({ id: 'id-1' }, 'sk-proj-a-working-replacement-key-0123456789')
+    expect(await svc.testConnection('id-1')).toMatchObject({ ok: true })
+    expect(holder.get().ai.connections[0].lastTest?.ok).toBe(true)
+    release!()
+    expect(await oldTest).toMatchObject({ ok: false }) // still reported to its caller …
+    expect(holder.get().ai.connections[0].lastTest?.ok).toBe(true) // … but not recorded
+  })
+
+  it('a newer Test supersedes an older one still running', async () => {
+    let n = 0
+    const { svc, holder } = setup({ route: () => (n++ === 0 ? 'hang' : { body: { object: 'list', data: [{ id: 'm' }] } }) })
+    svc.saveConnection({ kind: 'openai-compatible', baseUrl: 'http://localhost:11434/v1', model: 'm' })
+    const first = svc.testConnection('id-1') // hangs until its 200 ms timeout
+    expect(await svc.testConnection('id-1')).toMatchObject({ ok: true })
+    expect(await first).toMatchObject({ ok: false, message: expect.stringMatching(/No answer within/) })
+    expect(holder.get().ai.connections[0].lastTest?.ok).toBe(true)
+  })
+
+  it('a Test cancelled by switching AI off records nothing', async () => {
+    const { svc, holder } = setup({ route: () => 'hang' })
+    svc.saveConnection({ kind: 'openai' }, FAKE_KEYS.openai)
+    const p = svc.testConnection('id-1')
+    holder.update({ ai: { enabled: false } })
+    svc.cancelAll()
+    expect(await p).toMatchObject({ ok: false, message: 'Cancelled.' })
+    expect(holder.get().ai.connections[0].lastTest).toBeNull()
+  })
+})
+
+describe('aiReviewPosture — one slot, released by cancelReview', () => {
+  const m = { view: 'front', neckFwdDeg: 10, trunkFwdDeg: null, headPitchDeg: null, shoulderTiltDeg: null, headRollDeg: null, trunkLatDeg: null, localVerdict: 'good', localInstruction: null }
+  const req = (requestId?: unknown) => ({ purpose: 'check', share: 'sketch', imageJpegB64: JPEG_B64, measurements: m, ...(requestId === undefined ? {} : { requestId }) })
+  const answer = { body: { choices: [{ message: { content: '{"verdict":"good","score":90,"summary":"Upright.","instructions":[]}' } }] } }
+
+  it('a stopped review frees the slot at once; its late cleanup does not free the next one', async () => {
+    let n = 0
+    const { svc } = setup({ route: () => (n++ === 0 ? 'hang' : answer) })
+    svc.saveConnection({ kind: 'openai-compatible', baseUrl: 'http://localhost:11434/v1', model: 'llava' })
+    const first = svc.reviewPosture(req('r1'))
+    expect(await svc.reviewPosture(req('r2'))).toEqual({ ok: false, message: 'A review is already running.' })
+    svc.cancelReview('other') // another id: no effect
+    expect(await svc.reviewPosture(req('r2'))).toEqual({ ok: false, message: 'A review is already running.' })
+    svc.cancelReview('r1')
+    const second = svc.reviewPosture(req('r2')) // accepted right away
+    expect(await first).toEqual({ ok: false, message: 'AI review was cancelled.' })
+    // the cancelled review's cleanup ran — the second still holds the slot
+    expect(await svc.reviewPosture(req('r3'))).toEqual({ ok: false, message: 'A review is already running.' })
+    expect(await second).toMatchObject({ ok: true, verdict: 'good' })
+  })
+
+  it('validates the request id; a review without one still works', async () => {
+    const { svc, f } = setup({ route: () => answer })
+    svc.saveConnection({ kind: 'openai-compatible', baseUrl: 'http://localhost:11434/v1', model: 'llava' })
+    expect(await svc.reviewPosture(req('bad id!'))).toMatchObject({ ok: false, message: 'Invalid request id.' })
+    expect(await svc.reviewPosture(req(42))).toMatchObject({ ok: false })
+    expect(f.calls).toHaveLength(0)
+    expect(await svc.reviewPosture(req())).toMatchObject({ ok: true })
+    svc.cancelReview(undefined)
+    svc.cancelReview({})
+  })
 })
 
 describe('aiReviewPosture validation', () => {

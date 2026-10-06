@@ -134,6 +134,29 @@ describe('PostureEngine — detection and alerts', () => {
 })
 
 describe('PostureEngine — presence', () => {
+  it('starts away: an empty chair at launch is never reported as someone sitting', () => {
+    const { engine, sim, t0 } = setup()
+    const fresh = new PostureEngine(engine['baseline'], engineSettings())
+    const empty = runEngine(fresh, sim, null, t0, t0 + 1000)
+    expect(empty.snapshot.presence).toBe('away')
+    // the very first snapshot of a person too: presence needs 1.5 s of real landmarks
+    const first = fresh.processFrame(sim.render(good), t0 + 1000)
+    expect(first.snapshot.presence).toBe('away')
+    const seen = runEngine(fresh, sim, good, t0 + 1000 + 100, t0 + 3000)
+    expect(seen.snapshot.presence).toBe('active')
+  })
+
+  it('a long gap without frames needs the person confirmed again', () => {
+    const { engine, sim, t0 } = setup()
+    runEngine(engine, sim, good, t0, t0 + 3000)
+    expect(engine.presenceState).toBe('active')
+    const resume = t0 + 3000 + 10 * 60_000
+    // e.g. after a pause or sleep, with nobody in the chair any more
+    expect(engine.processFrame(null, resume).snapshot.presence).toBe('away')
+    expect(engine.processFrame(sim.render(good), resume + 100).snapshot.presence).toBe('away')
+    expect(runEngine(engine, sim, good, resume + 200, resume + 2500).snapshot.presence).toBe('active')
+  })
+
   it('goes away after 2 s without the user and comes back after 1.5 s', () => {
     const { engine, sim, t0 } = setup()
     const away = runEngine(engine, sim, null, t0, t0 + 2500)
@@ -332,10 +355,35 @@ describe('PostureEngine — holds', () => {
     const r1 = runEngine(engine, sim, far, t0, t0 + (RECAL_SUGGEST_S + 4) * 1000)
     expect(r1.snapshot.recalibrationSuggested).toBe(true)
     expect(r1.snapshot.worstStage).toBe(0)
+    // the suspension is emitted for the UI (score.ts isSuspended, liveModel statusView)
+    expect((r1.snapshot as { suspended?: boolean }).suspended).toBe(true)
     // back at the calibrated distance, with the head forward: detected and alerted again
     const bad = posture({ neckFlex: 25, headPitch: -25 })
     const r2 = runEngine(engine, sim, bad, t0 + 20_000, t0 + 40_000)
     expect(r2.snapshot.issues.headForward.stage).toBeGreaterThanOrEqual(1)
     expect(r2.alerts.some((a) => a.issue === 'headForward')).toBe(true)
+    // 20 s back in range (> RECAL_SUGGEST_S): the view matches setup again, the hint is withdrawn
+    expect(r2.snapshot.recalibrationSuggested).toBe(false)
+    expect((r2.snapshot as { suspended?: boolean }).suspended).toBeFalsy()
+  })
+
+  it('the recalibration hint is withdrawn only after RECAL_SUGGEST_S back in range, and stays while the view is off', () => {
+    const { engine, sim, t0 } = setup({ ...CAM, azimuth: 0, distance: 0.9 })
+    const far = posture({ slide: -1.2 })
+    // a camera that really moved: the hint stays up for as long as the view is off
+    const r1 = runEngine(engine, sim, far, t0, t0 + 60_000)
+    expect(r1.snapshot.recalibrationSuggested).toBe(true)
+    // briefly back (shorter than RECAL_SUGGEST_S), then off again: not withdrawn in between
+    const back = posture()
+    const r2 = runEngine(engine, sim, back, t0 + 60_000, t0 + 60_000 + (RECAL_SUGGEST_S - 4) * 1000)
+    expect(r2.snapshot.recalibrationSuggested).toBe(true)
+    expect((r2.snapshot as { suspended?: boolean }).suspended).toBe(false)
+    const t1 = t0 + 60_000 + (RECAL_SUGGEST_S - 4) * 1000
+    const r3 = runEngine(engine, sim, far, t1, t1 + 5000)
+    expect(r3.snapshot.recalibrationSuggested).toBe(true)
+    expect((r3.snapshot as { suspended?: boolean }).suspended).toBe(true)
+    // back for good: withdrawn after RECAL_SUGGEST_S (plus the scale smoother's settling)
+    const r4 = runEngine(engine, sim, back, t1 + 5000, t1 + 5000 + (RECAL_SUGGEST_S + 3) * 1000)
+    expect(r4.snapshot.recalibrationSuggested).toBe(false)
   })
 })

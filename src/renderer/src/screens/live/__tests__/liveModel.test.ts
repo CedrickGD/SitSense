@@ -4,6 +4,8 @@ import type { Landmark } from '@renderer/posture/types'
 import {
   backAngleText,
   bestGoodStretch,
+  dismissedForBaseline,
+  GAUGE_GATE_COPY,
   distanceText,
   fmtLiveDuration,
   gaugeGate,
@@ -82,6 +84,18 @@ describe('statusView', () => {
     expect(statusView({ ...base, snapshot: { presence: 'away', issues: issues({ sink: 2 }) } }).word).toBe('Away')
     expect(statusView({ ...base, mismatch: true }).kind).toBe('mismatch')
   })
+  it('never says Good while the detectors are suspended (view-changed drift)', () => {
+    // the engine forces every stage to 0 while suspended; the readout still shows the drift
+    const r = { view: 'front' as const, neckFwd: 6, trunkFwd: 4, drop: 2, forward: 30, lateral: 1 }
+    const v = statusView({ ...base, snapshot: { presence: 'active', issues: issues(), readout: r, suspended: true } })
+    expect(v).toMatchObject({ kind: 'changed', word: 'View changed', worst: null })
+    expect(gaugeGate('changed')).toBe('changed')
+    expect(GAUGE_GATE_COPY.changed).toMatch(/redo setup/)
+    // stronger states still win; detection resumed (suspended false) judges again
+    expect(statusView({ ...base, paused: true, snapshot: { presence: 'active', issues: issues(), suspended: true } }).kind).toBe('paused')
+    expect(statusView({ ...base, snapshot: { presence: 'away', issues: issues(), suspended: true } }).kind).toBe('away')
+    expect(statusView({ ...base, snapshot: { presence: 'active', issues: issues(), readout: r, suspended: false } }).kind).toBe('good')
+  })
   it('gauges show only while posture is judged', () => {
     expect(gaugeGate('good')).toBeNull()
     expect(gaugeGate('issue')).toBeNull()
@@ -146,6 +160,15 @@ describe('gaugeModels', () => {
     expect(g[0].value).toBeNull()
     expect(g[1]).toMatchObject({ label: 'Back angle', value: null })
     expect(g[1].unavailableReason).toMatch(/hips/)
+  })
+  it('side-lean zones follow the sub-metric the value came from', () => {
+    // trunk (or unknown source): trunkLat stages
+    expect(gaugeModels(readout)[2]).toMatchObject({ ticks: [6, 11, 18], range: [-20, 20] })
+    expect(gaugeModels({ ...readout, lateralFrom: 'trunk' } as typeof readout)[2].ticks).toEqual([6, 11, 18])
+    // hips not usable → neck tilt: neckLat stages, wider track so the 22° tick stays on it
+    const neck = gaugeModels({ ...readout, lateral: 7, lateralFrom: 'neck' } as typeof readout)[2]
+    expect(neck).toMatchObject({ ticks: [8, 14, 22], range: [-25, 25], valueText: '7° to your left' })
+    expect(gaugeModels({ ...readout, lateralFrom: 'neck' } as typeof readout, { lean: 2 })[2].ticks).toEqual([4, 7, 11])
   })
   it('side lean reads like the mirrored preview (your left on the left)', () => {
     const lean = gaugeModels(readout)[2]
@@ -252,6 +275,13 @@ describe('pickBanner (§3.7 priority)', () => {
     expect(pickBanner({ ...none, recalibrationSuggested: true, unverified: true })).toBe('recalibrate')
     expect(pickBanner({ ...none, recalibrationSuggested: true, recalibrateDismissed: true, unverified: true })).toBe('unverified')
     expect(pickBanner({ ...none, unverified: true, unverifiedDismissed: true, usingFallback: true })).toBe('fallback')
+  })
+  it('a view-changed dismissal only holds for the baseline it was made for', () => {
+    expect(dismissedForBaseline(null, 1000)).toBe(false)
+    expect(dismissedForBaseline(1000, 1000)).toBe(true)
+    // a new setup re-arms the banner
+    expect(dismissedForBaseline(1000, 2000)).toBe(false)
+    expect(dismissedForBaseline(1000, undefined)).toBe(false)
   })
 })
 

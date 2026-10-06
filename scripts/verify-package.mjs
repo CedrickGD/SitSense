@@ -19,6 +19,7 @@ import { builtinModules, createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, extname, join, posix, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { expectedDistributables, planRelease } from './lib/distributables.mjs'
 import { UPDATE_HOSTS, UPDATER_NETWORK_PACKAGES, checkAppUpdateYml, checkPackedModules, networkApiSites, packageOfPath, parseUpdateYml, updaterWiring } from './lib/update-scan.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -1092,13 +1093,18 @@ async function smoke(id, title, extraArgs, shotName, opts = {}) {
 function checkDistributables() {
   const c = check('distributables', 'Portable exe + NSIS installer (no install/admin, OS floor)')
   const files = existsSync(distDir) ? readdirSync(distDir) : []
-  const portable = files.find((f) => /portable.*\.exe$/i.test(f))
-  const setup = files.find((f) => /setup.*\.exe$/i.test(f))
-  for (const [label, f] of [['portable', portable], ['installer', setup]]) {
-    if (!f) {
-      c.fail(`no ${label} exe in ${distDir}`)
-      continue
-    }
+  // dist/ keeps older builds side by side: pick THIS version's exes by their exact
+  // electron-builder artifact names, never by the first file matching a pattern
+  const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
+  const yml = readFileSync(join(root, 'electron-builder.yml'), 'utf8')
+  const expected = expectedDistributables(yml, version)
+  const latestPath = join(distDir, 'latest.yml')
+  const latest = existsSync(latestPath) ? parseUpdateYml(readFileSync(latestPath, 'utf8')) : null
+  const plan = planRelease({ files, version, expected, latest })
+  for (const [label, f] of plan.missing) c.fail(`no ${label} exe ${f} for ${version} in ${distDir} — run npm run dist`)
+  if (plan.stale.length) c.warn(`other exes in ${distDir} (older builds?): ${plan.stale.join(', ')} — do not upload them to v${version}`)
+  for (const f of [expected.portable, expected.setup]) {
+    if (!files.includes(f)) continue
     const p = join(distDir, f)
     const nsis = grepFile(p, 'NullsoftInst', 0)
     const level = grepFile(p, 'requestedExecutionLevel level="', 30)?.match(/level="(\w+)"/)?.[1]
@@ -1107,7 +1113,6 @@ function checkDistributables() {
     if (level !== 'asInvoker') c.fail(`${f}: manifest requests "${level}" — would trigger UAC`)
     else c.ok(`${f} (${size} MB): single-file NSIS self-extractor, manifest requestedExecutionLevel=asInvoker (no UAC/admin)`)
   }
-  const yml = readFileSync(join(root, 'electron-builder.yml'), 'utf8')
   if (/perMachine:\s*false/.test(yml) && /oneClick:\s*true/.test(yml)) c.ok('electron-builder.yml nsis: oneClick + perMachine:false → per-user install to %LOCALAPPDATA%\\Programs, no UAC')
   else c.warn('nsis is not oneClick per-user — the installer may prompt for elevation')
   if (/allowElevation:\s*true/.test(yml)) c.warn('nsis.allowElevation is true')
@@ -1131,23 +1136,13 @@ function checkDistributables() {
   }
   // the update feed: an installed SitSense reads latest.yml from the GitHub release and
   // downloads the installer it names — every name must match a file uploaded to the release
-  const latest = join(distDir, 'latest.yml')
-  if (!existsSync(latest)) {
+  if (!latest) {
     c.fail(`no latest.yml in ${distDir} — installed copies could not find this version (the nsis target writes it)`)
     return
   }
-  const y = parseUpdateYml(readFileSync(latest, 'utf8'))
-  const named = [...new Set([y.path, ...y.files].filter(Boolean))]
-  const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
-  if (y.version !== version) c.fail(`latest.yml is for ${y.version}, package.json is ${version} — stale dist?`)
-  for (const f of named) {
-    if (/\s/.test(f)) c.fail(`latest.yml names "${f}" — GitHub renames assets with spaces, so the download would 404`)
-    else if (!existsSync(join(distDir, f))) c.fail(`latest.yml names ${f}, which is not in ${distDir}`)
-  }
-  const blockmaps = named.map((f) => `${f}.blockmap`).filter((b) => existsSync(join(distDir, b)))
-  if (!blockmaps.length) c.warn('no .blockmap next to the installer — updates still work, but always download the full installer')
-  const assets = ['latest.yml', ...named, ...blockmaps, portable].filter(Boolean)
-  if (!c.r.problems.length) c.ok(`update feed latest.yml ${y.version} → ${named.join(', ')}. GitHub release v${version} must carry exactly these assets: ${assets.join(', ')}`)
+  for (const p of plan.problems) c.fail(p)
+  if (!plan.blockmaps.length) c.warn('no .blockmap next to the installer — updates still work, but always download the full installer')
+  if (!c.r.problems.length) c.ok(`update feed latest.yml ${latest.version} → ${plan.named.join(', ')}. GitHub release v${version} must carry exactly these assets: ${plan.assets.join(', ')}`)
 }
 
 // ───────────────────────────── run ─────────────────────────────

@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { MESH_INTENSITY_DEFAULT, meshIntensityOf, meshLook } from '../meshLook'
+import { MESH_INTENSITY_DEFAULT, meshDimsBackdrop, meshIntensityOf, meshLook } from '../meshLook'
+
+describe('meshDimsBackdrop', () => {
+  it('follows the backdrop setting, not the last style written (Lines → Mesh keeps the dim look)', () => {
+    expect(meshDimsBackdrop({ style: 'mesh', meshBackdrop: 'dim' })).toBe(true)
+    expect(meshDimsBackdrop({ style: 'mesh', meshBackdrop: 'camera' })).toBe(false)
+    expect(meshDimsBackdrop({ style: 'mesh' })).toBe(false)
+    // the backdrop only applies to the mesh
+    expect(meshDimsBackdrop({ style: 'skeleton', meshBackdrop: 'dim' })).toBe(false)
+    expect(meshDimsBackdrop({ style: 'off', meshBackdrop: 'dim' })).toBe(false)
+  })
+  it('reads the legacy hologram style as a dimmed mesh', () => {
+    expect(meshDimsBackdrop({ style: 'hologram' })).toBe(true)
+    expect(meshDimsBackdrop(null)).toBe(false)
+  })
+})
 
 describe('meshIntensityOf', () => {
   it('defaults when the field is missing or garbage', () => {

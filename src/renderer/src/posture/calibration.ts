@@ -64,7 +64,7 @@
 // 'reviewing', frames still update `features`/`assessment` but not the phase.
 
 import type { CalibrationBaseline, UpSource, Vec3 } from '@shared/posture'
-import { ESSENTIAL_CHECKS, assessPosture, type CheckId, type PostureAssessment } from './assess'
+import { ESSENTIAL_CHECKS, assessPosture, isSideYaw, type CheckId, type PostureAssessment } from './assess'
 import {
   ASSESS_HOLD_SLACK,
   ASSESS_RELATIVE_WINDOW_S,
@@ -83,7 +83,7 @@ import {
   SETUP_MIN_FRAMES,
   SETUP_WARMUP_FRAMES,
   SIDE_VIEW_YAW,
-  SIDE_VIEW_YAW_MAX,
+  SIDE_VIEW_YAW_HYST,
   UNVERIFIED_FORCE_AFTER_S,
   UP_MAX_TILT,
   STABLE_ANCHOR_M,
@@ -98,10 +98,11 @@ import {
   cameraPitchDeg,
   cameraUp,
   extractFeatures,
+  extractFeaturesChecked,
   headOnTrunkAngle,
   neckOnTrunkAngle
 } from './features'
-import type { Frame, NeckLatRef, PostureBaseline, PostureFeatures, UpEstimate, ViewInfo } from './types'
+import type { Frame, FrameReject, NeckLatRef, PostureBaseline, PostureFeatures, UpEstimate, ViewInfo } from './types'
 import { add, angleDeg, median, scale, trimmedMean, unit } from './vec'
 
 export type SetupPhase = 'searching' | 'coaching' | 'holding' | 'capturing' | 'reviewing' | 'done' | 'failed'
@@ -194,6 +195,11 @@ export interface SetupState {
   up: UpEstimate
   /** the hips look real and are used (false: hallucinated, ignored) */
   hipsTrusted: boolean
+  /**
+   * Why the latest frame was BAD (null when GOOD; see FrameReject): 'too-far' / 'not-upright'
+   * is a pose that is not the user (a figure on the desk, a poster, someone behind them).
+   */
+  frameReject?: FrameReject | null
 }
 
 interface Captured {
@@ -201,12 +207,58 @@ interface Captured {
   t: number
 }
 
-export class SetupSession {
-  private readonly opts: { review: boolean | 'auto'; now: () => number; cameraDeviceId: string | null }
+/**
+ * The setup session's live gravity: a level-camera estimate over every frame since reset(),
+ * with the hips (and knees) ignored while they look hallucinated (HipConsistency). Setup step
+ * 1's camera check (detection/setup-ui.ts SetupProbe) measures with one too, so it sees what
+ * the session will — never the saved baseline's gravity or hip setting.
+ */
+export class LiveSetupGravity {
   private readonly upEst = new UpEstimator()
   /** the same estimate without hips/knees, used once the hips are judged hallucinated */
   private readonly upEstNoHips = new UpEstimator()
   private readonly hipCheck = new HipConsistency()
+
+  push(frame: Frame): void {
+    this.hipCheck.push(frame)
+    this.upEst.push(frame)
+    this.upEstNoHips.push(frame, { hips: false })
+  }
+
+  /** the hips look real and are used */
+  get hipsTrusted(): boolean {
+    return this.hipCheck.trusted
+  }
+
+  get estimator(): UpEstimator {
+    return this.hipsTrusted ? this.upEst : this.upEstNoHips
+  }
+
+  get estimate(): UpEstimate {
+    return this.estimator.estimate
+  }
+
+  /** A frame's features measured with the current estimate. */
+  extract(frame: Frame): PostureFeatures | null {
+    return this.extractChecked(frame).features
+  }
+
+  /** extract, plus why a BAD frame is BAD (FrameReject; null for a GOOD frame). */
+  extractChecked(frame: Frame): { features: PostureFeatures | null; reject: FrameReject | null } {
+    const up = this.estimate
+    return extractFeaturesChecked(frame, { up: up.up, upSource: up.source, hips: this.hipsTrusted })
+  }
+
+  reset(): void {
+    this.upEst.reset()
+    this.upEstNoHips.reset()
+    this.hipCheck.reset()
+  }
+}
+
+export class SetupSession {
+  private readonly opts: { review: boolean | 'auto'; now: () => number; cameraDeviceId: string | null }
+  private readonly gravity = new LiveSetupGravity()
 
   private phase: SetupPhase = 'searching'
   private lastT: number | null = null
@@ -245,6 +297,7 @@ export class SetupSession {
   /** the last ASSESS_RELATIVE_WINDOW_S of GOOD frames, with the gravity each was measured with */
   private window: Array<{ t: number; f: PostureFeatures; frame: NonNullable<Frame>; up: Vec3; src: UpSource; hips: boolean }> = []
   private latest: PostureFeatures | null = null
+  private latestReject: FrameReject | null = 'no-pose'
   private assessment: PostureAssessment = assessPosture(null)
   private result: CalibrationBaseline | null = null
   private resultUnverified: CheckId[] = []
@@ -284,7 +337,8 @@ export class SetupSession {
       notice: this.notice(),
       baseline: captured ? this.result : null,
       up: this.liveUp(),
-      hipsTrusted: this.hipCheck.trusted
+      hipsTrusted: this.gravity.hipsTrusted,
+      frameReject: this.latestReject
     }
   }
 
@@ -339,13 +393,13 @@ export class SetupSession {
     this.lastT = tMs
 
     // live features + assessment (also during reviewing/done so the UI stays live)
-    this.hipCheck.push(frame)
-    this.upEst.push(frame)
-    this.upEstNoHips.push(frame, { hips: false })
+    this.gravity.push(frame)
     const up = this.liveUp()
-    const hips = this.hipCheck.trusted
-    const f = extractFeatures(frame, { up: up.up, upSource: up.source, hips })
+    const hips = this.gravity.hipsTrusted
+    const checked = this.gravity.extractChecked(frame)
+    const f = checked.features
     this.latest = f
+    this.latestReject = checked.reject
     while (this.window.length > 0 && tMs - this.window[0].t > ASSESS_RELATIVE_WINDOW_S * 1000) this.window.shift()
     // the window is judged with ONE gravity: frames measured with an earlier estimate (while
     // it settles over the first frames, or when the hips' verdict flips) are measured again,
@@ -375,9 +429,13 @@ export class SetupSession {
       const long = medianFeatures(this.window.map((w) => w.f))
       if (m.neckOnTrunk !== undefined) m.neckOnTrunk = long.neckOnTrunk ?? null
       if (m.headOnTrunk !== undefined) m.headOnTrunk = long.headOnTrunk ?? null
+      // the near-profile verdict rests on the optical yaw: of the longer window too (a noisy
+      // yaw near SIDE_VIEW_YAW must not flip it), with hysteresis while holding/capturing
+      m.view = { ...m.view, opticalYawDeg: long.view.opticalYawDeg }
       this.assessment = assessPosture(m, undefined, {
         slack: holdingOn ? ASSESS_HOLD_SLACK : 1,
-        levelUnconfirmed: !this.liveEstimator().levelConsistent
+        levelUnconfirmed: !this.liveEstimator().levelConsistent,
+        sideYawMin: holdingOn ? SIDE_VIEW_YAW - SIDE_VIEW_YAW_HYST : SIDE_VIEW_YAW
       })
     }
 
@@ -550,7 +608,7 @@ export class SetupSession {
   // -------------------------------------------------------------------------
 
   private liveEstimator(): UpEstimator {
-    return this.hipCheck.trusted ? this.upEst : this.upEstNoHips
+    return this.gravity.estimator
   }
 
   private liveUp(): UpEstimate {
@@ -637,7 +695,9 @@ export class SetupSession {
     const res = buildBaseline(this.captured.map((c) => c.frame), {
       verified: !this.forced,
       capturedAt: this.opts.now(),
-      cameraDeviceId: this.opts.cameraDeviceId
+      cameraDeviceId: this.opts.cameraDeviceId,
+      // the capture was held as near-profile with the hold's hysteresis: the exam keeps it
+      ...(this.forced ? {} : { sideYawMin: SIDE_VIEW_YAW - SIDE_VIEW_YAW_HYST })
     })
     if (!res.ok) {
       // a stability failure right after a tolerated wobble is that wobble, not a user
@@ -671,7 +731,9 @@ export class SetupSession {
     }
     if (!this.forced && !verifiedHere) {
       // an essential check is not verifiable from this camera and there is nobody to ask:
-      // never saved on its own — coach (the live assessment says how to make it checkable)
+      // never saved on its own — coach, and say why the capture was not kept (the live
+      // assessment may already read verifiable again; its own instruction comes first)
+      this.examInstruction = exam.viewInstruction
       this.resultUnverified = []
       this.toCoaching()
       return
@@ -714,6 +776,12 @@ export interface BuildOptions {
   verified: boolean
   capturedAt: number
   cameraDeviceId: string | null
+  /**
+   * The optical yaw from which the capture counts as near-profile (AssessOptions.sideYawMin;
+   * default SIDE_VIEW_YAW): the setup session passes its hold hysteresis for an unforced capture.
+   * Used by the final exam and by refineUpWithTrunk alike.
+   */
+  sideYawMin?: number
 }
 
 /**
@@ -742,7 +810,7 @@ export function buildBaseline(frames: readonly Frame[], opts: BuildOptions): Bui
   }
   let feats = extractAll(measured.up)
   if (feats.length < SETUP_MIN_FRAMES) return { ok: false, reason: 'lost' }
-  const up = { ...measured, up: refineUpWithTrunk(measured, est.pitchWeight, feats) }
+  const up = { ...measured, up: refineUpWithTrunk(measured, est.pitchWeight, feats, opts.sideYawMin) }
   if (up.up !== measured.up) feats = extractAll(up.up)
   if (feats.length < SETUP_MIN_FRAMES) return { ok: false, reason: 'lost' }
   // a brief movement (a wobble the live judgement tolerated) leaves a few frames far off
@@ -787,7 +855,7 @@ export function buildBaseline(frames: readonly Frame[], opts: BuildOptions): Bui
     ppm: trimmedMean(withScale.map((f) => f.ppm as number)),
     anchor
   }
-  const assessment = assessPosture(m, up.source, { levelUnconfirmed: !est.levelConsistent })
+  const assessment = assessPosture(m, up.source, { levelUnconfirmed: !est.levelConsistent, sideYawMin: opts.sideYawMin })
   return { ok: true, baseline, unverified: assessment.unverified, assessment }
 }
 
@@ -805,10 +873,10 @@ export function buildBaseline(frames: readonly Frame[], opts: BuildOptions): Bui
  * up by 7°, drawn as a tilted true vertical at runtime. See Implementation notes in
  * docs/specs/detection.md.
  */
-function refineUpWithTrunk(measured: UpEstimate, pitchWeight: number, feats: PostureFeatures[]): Vec3 {
+function refineUpWithTrunk(measured: UpEstimate, pitchWeight: number, feats: PostureFeatures[], sideYawMin?: number): Vec3 {
   if (measured.source === 'body' || !(pitchWeight < 1)) return measured.up
   const yaw = median(feats.map((f) => f.view.opticalYawDeg))
-  if (yaw >= SIDE_VIEW_YAW && yaw <= SIDE_VIEW_YAW_MAX) return measured.up
+  if (isSideYaw(yaw, sideYawMin)) return measured.up
   const trunk = feats.filter((f) => f.trunkFwd !== null)
   if (trunk.length * 2 < feats.length) return measured.up
   const t = median(trunk.map((f) => f.trunkFwd as number))

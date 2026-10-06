@@ -191,6 +191,23 @@ describe('KPI tiles', () => {
     expect(k.sitting.sub).toBe('5h 00m a day')
     expect(weekKpis([emptyDay('2026-10-06')], []).aligned.value).toBe('—')
   })
+  it('only calls zero nudges "none needed" on a day that was actually aligned', () => {
+    // nudges switched off / filtered: no toast was shown although the user slouched a lot
+    const slouched = summarizeDay('2026-10-05', { date: '2026-10-05', minutes: [...run(at(9), 45, 'good'), ...run(at(10), 55, 'sink:2')], alerts: 0 })
+    expect(dayKpis({ day: slouched, previous: [], stretches: null, everyMinutes: 50, isToday: false }).nudges).toMatchObject({
+      value: '0',
+      sub: 'none',
+      tone: 'faint'
+    })
+    expect(weekKpis([slouched], []).nudges).toMatchObject({ sub: 'none', tone: 'faint' })
+    const aligned = summarizeDay('2026-10-05', { date: '2026-10-05', minutes: [...run(at(9), 90, 'good'), ...run(at(11), 10, 'sink:1')], alerts: 0 })
+    expect(dayKpis({ day: aligned, previous: [], stretches: null, everyMinutes: 50, isToday: false }).nudges).toMatchObject({
+      value: '0',
+      sub: 'none needed',
+      tone: 'good'
+    })
+    expect(weekKpis([aligned], []).nudges).toMatchObject({ sub: 'none needed', tone: 'good' })
+  })
   it('formats the streak', () => {
     expect(streakKpi({ current: 3, best: 9 })).toMatchObject({ value: '3 days', sub: 'best 9', tone: 'good' })
     expect(streakKpi({ current: 1, best: 1 }).value).toBe('1 day')

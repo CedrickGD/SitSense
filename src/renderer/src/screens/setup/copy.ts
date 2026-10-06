@@ -4,16 +4,19 @@
 
 import type { ViewKind } from '@shared/posture'
 import type { Settings } from '@shared/settings'
-import { aiAvailable, aiReviewsSetup, primaryAiConnection } from '@renderer/ai/helpers'
+import { aiAvailable, aiNeedsSetup, aiReviewsSetup, primaryAiConnection } from '@renderer/ai/helpers'
 import { ESSENTIAL_CHECKS, type CheckId } from '@renderer/posture/assess'
 import type { BaselineSummary, DetectorError, SetupCheckUi, SetupUiState } from '@renderer/state/store'
-import type { SetupProbeState } from '@renderer/detection/setup-ui'
+import type { SetupProbeState, SetupUi } from '@renderer/detection/setup-ui'
 
 export const VIEW_LABEL: Record<ViewKind, string> = {
   front: 'Front view',
   angled: 'Angled view',
-  side: 'Side view · works great'
+  side: 'Side view'
 }
+
+/** the step-1 Angle row for a side view the judge can check the back from */
+export const SIDE_VIEW_GOOD = 'Side view · works great'
 
 /** Short view names for the glass chip on the camera. */
 export const VIEW_CHIP: Record<ViewKind, string> = {
@@ -58,19 +61,39 @@ export interface ScreenEnv {
   ai?: AiSetupState
 }
 
+export type CameraFix = 'hips' | 'front' | 'profile' | 'level'
+
+/** The trunk can't be judged from this direction: from the front turn the camera, else turn it further. */
+const angleFix = (view: ViewKind | null): CameraFix => (view === 'angled' || view === 'side' ? 'profile' : 'front')
+
 /**
  * Why an essential can't be checked when only the camera view (or an AI model) can fix it
  * (§7.4.1): 'hips' = hips hidden or outside the picture · 'front' = the trunk lean can't
- * be judged from straight in front · null = the session's own instruction can still
- * unblock it (an adjust row, or "sit back and look ahead" when two readings disagree).
+ * be judged from straight in front · 'profile' = nor from this angled or not-quite-side
+ * view · 'level' = the camera looks tilted (rolled) · null = the session's own instruction
+ * can still unblock it (an adjust row, "sit back and look ahead" when two readings disagree,
+ * or a head a little forward of the limit).
  */
-export function cameraFix(setup: SetupUiState): 'hips' | 'front' | null {
+export function cameraFix(setup: SetupUi): CameraFix | null {
   if (unverifiedEssentials(setup).length === 0) return null
   // something the user CAN change comes first
   if (setup.checks.some((c) => c.status === 'adjust' && c.id !== 'inView')) return null
+  // detection says why (setup-ui.ts viewFix): the headline and the Target card agree on it
+  switch (setup.viewFix) {
+    case 'hips':
+      return 'hips'
+    case 'angle':
+      return angleFix(setup.view)
+    case 'level':
+      return 'level'
+    case 'lean':
+    case 'head':
+      return null
+  }
   const ins = setup.instruction ?? ''
   if (/hips are hidden|hips are in the picture|tilt the camera down/i.test(ins)) return 'hips'
-  if (/straight in front/i.test(ins)) return 'front'
+  if (/straight in front|this camera angle/i.test(ins)) return angleFix(setup.view)
+  if (/straighten the camera/i.test(ins)) return 'level'
   if (/sit back against your backrest and look/i.test(ins)) return null
   return setup.view === 'front' ? 'front' : 'hips'
 }
@@ -83,18 +106,37 @@ export const CAMERA_FIX_COPY = {
   },
   front: {
     text: "I can't judge your back angle from straight in front.",
-    sub: 'Turn the camera a little to the side — or let an AI model check it.',
-    note: 'Turn the camera a little to the side, or let an AI model check your back.'
+    // a slight turn only gives an angled view, which can't judge the back either (§7.4.1)
+    sub: 'Turn the camera to your side — side-on works best — or let an AI model check it.',
+    note: 'Turn the camera to your side (side-on works best), or let an AI model check your back.'
+  },
+  level: {
+    text: 'Your camera looks tilted.',
+    sub: "So I can't confirm your back angle. Straighten the camera so it sits level — or let an AI model check it.",
+    note: 'Straighten the camera so it sits level, or let an AI model check your back.'
+  },
+  profile: {
+    text: "I can't judge your back angle from this angle yet.",
+    sub: 'Turn the camera further to your side — about 90°, squarely side-on — or let an AI model check it.',
+    note: 'Turn the camera further to your side (about 90°), or let an AI model check your back.'
   }
 } as const
 
 /** The primary copy is a camera-view fix, not a posture instruction (no "Suggested by"). */
 export function isCameraFixCopy(text: string): boolean {
-  return text === CAMERA_FIX_COPY.hips.text || text === CAMERA_FIX_COPY.front.text
+  return Object.values(CAMERA_FIX_COPY).some((c) => c.text === text)
+}
+
+/**
+ * The session's "can't judge your back angle from straight in front" names the front view;
+ * under an angled or side view it says "from this angle" instead.
+ */
+export function viewWorded(text: string, view: ViewKind | null): string {
+  return view === 'angled' || view === 'side' ? text.replace(/from straight in front/i, 'from this angle') : text
 }
 
 /** Saving is on hold after repeated rejections and the reviewer's point is what's left. */
-function onHoldCopy(setup: SetupUiState): PrimaryCopy | null {
+function onHoldCopy(setup: SetupUi): PrimaryCopy | null {
   const r = setup.reviewResult
   if (setup.autoCapture || !r || r.verdict !== 'adjust') return null
   const ins = r.instructions[0] ?? r.summary
@@ -104,7 +146,7 @@ function onHoldCopy(setup: SetupUiState): PrimaryCopy | null {
 }
 
 /** Nobody in view yet (or the camera is still starting): only the In view row matters. */
-export function waitingForView(setup: SetupUiState): boolean {
+export function waitingForView(setup: SetupUi): boolean {
   if (setup.phase === 'idle') return true
   if (setup.phase !== 'searching') return false
   return setup.checks.find((c) => c.id === 'inView')?.status !== 'good'
@@ -123,7 +165,7 @@ export function blockedCopy(setup: Pick<SetupUiState, 'suspended'>, env: ScreenE
 }
 
 /** The coach panel's primary instruction for the current state. */
-export function primaryCopy(setup: SetupUiState, env: ScreenEnv): PrimaryCopy {
+export function primaryCopy(setup: SetupUi, env: ScreenEnv): PrimaryCopy {
   const plain = (text: string, sub: string | null = null, tone: PrimaryTone = 'normal'): PrimaryCopy => ({
     text,
     sub,
@@ -168,17 +210,17 @@ export function primaryCopy(setup: SetupUiState, env: ScreenEnv): PrimaryCopy {
       if (fix) return plain(CAMERA_FIX_COPY[fix].text, CAMERA_FIX_COPY[fix].sub)
       const hold = onHoldCopy(setup)
       if (hold) return hold
-      if (setup.phase === 'searching' && setup.instruction) return plain(setup.instruction)
+      if (setup.phase === 'searching' && setup.instruction) return plain(viewWorded(setup.instruction, setup.view))
       return withAttribution(setup, setup.instruction ?? 'One moment — SitSense is taking a look.')
     }
   }
 }
 
-function withAttribution(setup: SetupUiState, text: string): PrimaryCopy {
+function withAttribution(setup: SetupUi, text: string): PrimaryCopy {
   const r = setup.reviewResult
   const fromReviewer =
     r !== null && r.verdict === 'adjust' && setup.instruction !== null && setup.instruction === (r.instructions[0] ?? r.summary)
-  return { text, sub: null, tone: 'normal', attribution: fromReviewer ? `Suggested by ${r.label}` : null }
+  return { text: viewWorded(text, setup.view), sub: null, tone: 'normal', attribution: fromReviewer ? `Suggested by ${r.label}` : null }
 }
 
 /**
@@ -197,7 +239,7 @@ export function splitInstruction(text: string): { head: string; sub: string | nu
 }
 
 /** Which progress widget the panel shows. */
-export function progressKind(setup: SetupUiState): 'hold' | 'capture' | 'review' | null {
+export function progressKind(setup: SetupUi): 'hold' | 'capture' | 'review' | null {
   switch (setup.phase) {
     case 'holding':
       return 'hold'
@@ -271,7 +313,7 @@ export function essentialsChecked(checks: readonly SetupCheckUi[]): { done: numb
 }
 
 /** Essential checks the camera can't measure right now (in view only). */
-export function unverifiedEssentials(setup: SetupUiState): CheckId[] {
+export function unverifiedEssentials(setup: SetupUi): CheckId[] {
   if (waitingForView(setup)) return []
   if (setup.phase === 'reviewing' || setup.phase === 'done') return setup.unverifiedChecks.filter((id) => ESSENTIALS.includes(id))
   return setup.checks.filter((c) => c.status === 'unknown' && ESSENTIALS.includes(c.id)).map((c) => c.id)
@@ -282,12 +324,13 @@ export function unverifiedEssentials(setup: SetupUiState): CheckId[] {
 /**
  * What the target figure highlights: the body part the primary instruction is about.
  * 'lying' = sliding down / lying in the chair · 'back' = leaning forward · 'recline' =
- * leaning far back · 'head' = head forward / gaze · 'hips' = the camera can't check the
- * back (show the hips / sit tall) · 'side' = lateral issues · null = nothing to fix.
+ * leaning far back · 'head' = head forward / gaze · 'hips' = the camera can't see the hips,
+ * so it can't check the back · 'verify' = it sees the hips but can't judge the back from
+ * this angle · 'side' = lateral issues · null = nothing to fix.
  */
-export type GuideFocus = 'lying' | 'back' | 'recline' | 'head' | 'hips' | 'side' | null
+export type GuideFocus = 'lying' | 'back' | 'recline' | 'head' | 'hips' | 'verify' | 'side' | null
 
-export function guideFocus(setup: SetupUiState): GuideFocus {
+export function guideFocus(setup: SetupUi): GuideFocus {
   if (waitingForView(setup)) return null
   const ins = setup.instruction ?? ''
   if (/lying|sliding down/i.test(ins)) return 'lying'
@@ -307,7 +350,14 @@ export function guideFocus(setup: SetupUiState): GuideFocus {
         return null
     }
   }
-  if (setup.needsVerification || unverifiedEssentials(setup).length > 0) return 'hips'
+  if (setup.needsVerification || unverifiedEssentials(setup).length > 0) {
+    // why it can't be verified (detection's viewFix): the hips, the camera angle, or two
+    // readings that disagree as when leaning in toward the screen
+    if (setup.viewFix === 'angle' || setup.viewFix === 'level') return 'verify'
+    if (setup.viewFix === 'lean') return 'back'
+    if (setup.viewFix === 'head') return 'head'
+    return 'hips'
+  }
   return null
 }
 
@@ -319,6 +369,8 @@ export const GUIDE_LINE: Record<Exclude<GuideFocus, null> | 'none', string> = {
   recline: 'Come up from the recline until your back is close to upright.',
   head: 'Stack your ears over your shoulders — chin level, eyes on the middle of the screen.',
   hips: 'Hips all the way back, back against the backrest. The camera needs to see your hips to confirm it.',
+  verify:
+    'Hips all the way back, back against the backrest, ears over your shoulders. From this angle a squarely side-on camera or an AI model has to confirm your back.',
   side: 'Center your weight on both hips and let your shoulders drop.'
 }
 
@@ -370,7 +422,10 @@ export function probeRows(p: SetupProbeState, env: { running: boolean; cameraErr
             label: 'Hips',
             tone: 'info',
             text: 'I can see your hips',
-            detail: 'Your back angle is hard to judge from straight in front — an AI model or a side angle can confirm it.'
+            detail:
+              p.view === 'angled' || p.view === 'side'
+                ? 'Your back angle can’t be confirmed from this angle — turn the camera so it faces your side squarely (about 90°), or an AI model can confirm it.'
+                : 'Your back angle is hard to judge from straight in front — an AI model or a side angle can confirm it.'
           }
     )
   } else if (p.hips === 'hidden') {
@@ -390,7 +445,9 @@ export function probeRows(p: SetupProbeState, env: { running: boolean; cameraErr
       detail: 'Tilt the camera down a little or sit a bit farther back.'
     })
   }
-  rows.push({ id: 'angle', label: 'Angle', tone: 'info', text: p.view ? VIEW_LABEL[p.view] : 'Camera angle', detail: null })
+  // "works great" only where the back really can be judged from this view
+  const angle = !p.view ? 'Camera angle' : p.view === 'side' && p.backCheckable ? SIDE_VIEW_GOOD : VIEW_LABEL[p.view]
+  rows.push({ id: 'angle', label: 'Angle', tone: 'info', text: angle, detail: null })
   return rows
 }
 
@@ -406,6 +463,8 @@ export function backWarning(p: SetupProbeState, ai: AiSetupState): string | null
       return `${need} — turn your AI model on for setup, or improve the view now.`
     case 'turned-off':
       return `${need} — turn your AI model back on, or improve the view now.`
+    case 'needs-setup':
+      return `${need} — finish setting up your AI model, or improve the view now.`
     default:
       return `${need} — connect an AI model for one, or improve the view now.`
   }
@@ -415,13 +474,16 @@ export function backWarning(p: SetupProbeState, ai: AiSetupState): string | null
 
 /**
  * 'none' = no connection saved · 'turned-off' = connections saved, but the AI switch or
- * every connection is off · 'off-in-setup' = available, "Use during setup" off · 'on'.
+ * every connection is off · 'needs-setup' = AI and a connection are on, but none can be
+ * called yet (missing key, model or server address) · 'off-in-setup' = available, "Use
+ * during setup" off · 'on'.
  */
-export type AiSetupState = 'none' | 'turned-off' | 'off-in-setup' | 'on'
+export type AiSetupState = 'none' | 'turned-off' | 'needs-setup' | 'off-in-setup' | 'on'
 
 export function aiSetupState(settings: Settings | null): AiSetupState {
   if (aiReviewsSetup(settings)) return 'on'
   if (aiAvailable(settings)) return 'off-in-setup'
+  if (aiNeedsSetup(settings)) return 'needs-setup'
   return (settings?.ai.connections.length ?? 0) > 0 ? 'turned-off' : 'none'
 }
 
@@ -437,6 +499,8 @@ export function aiHintCopy(ai: AiSetupState, label: string | null): { text: stri
       return { text: 'Want a second opinion? Connect an AI model and it can check what the camera can’t.', action: 'Open AI settings' }
     case 'turned-off':
       return { text: 'Your AI model is turned off. Turn it on and it can check what the camera can’t.', action: 'Open AI settings' }
+    case 'needs-setup':
+      return { text: 'Your AI model needs a key or a model — finish it in AI settings and it can check what the camera can’t.', action: 'Open AI settings' }
     case 'off-in-setup':
       return {
         text: `Let ${label ?? 'your AI model'} double-check setup — it can check what the camera can’t.`,
@@ -475,13 +539,16 @@ export function baselineReadout(b: BaselineSummary): string {
 }
 
 /** The Saved step's verification chip (§7.6). */
-export function verificationBadge(setup: SetupUiState): { tone: 'sage' | 'amber'; text: string } | null {
+export function verificationBadge(setup: SetupUi): { tone: 'sage' | 'amber'; text: string } | null {
   const s = setup.baselineSummary
   if (!s) return null
   if (s.forced || !s.verified) return { tone: 'amber', text: 'Not verified — saved anyway' }
   const r = setup.reviewResult?.verdict === 'good' ? setup.reviewResult : null
   if (!r) return { tone: 'sage', text: 'Verified by on-device AI' }
-  return setup.unverifiedChecks.length > 0
+  // what the reviewer had to judge because the on-device judge couldn't (the session clears
+  // its own unverified list once the review accepts, so the verdict records it)
+  const covered = r.covered ?? setup.unverifiedChecks
+  return covered.length > 0
     ? { tone: 'sage', text: `Verified by ${r.label}` }
     : { tone: 'sage', text: `Verified by on-device AI and ${r.label}` }
 }
@@ -536,6 +603,11 @@ export function unverifiedCopy(
     case 'turned-off':
       return {
         text: `From this angle SitSense can't check ${what} on its own. Turn on your AI model in Settings → AI models for a second opinion.${tip}`,
+        linkToSettings: true
+      }
+    case 'needs-setup':
+      return {
+        text: `From this angle SitSense can't check ${what} on its own. Finish setting up your AI model in Settings → AI models for a second opinion.${tip}`,
         linkToSettings: true
       }
     case 'off-in-setup':

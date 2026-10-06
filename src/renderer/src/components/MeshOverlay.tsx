@@ -2,8 +2,9 @@ import { useEffect, useRef, type JSX } from 'react'
 import { ISSUES, type IssueId, type Stage } from '@shared/posture'
 import { OVERLAY_PRESETS, type OverlaySettings } from '@shared/settings'
 import { STAGE_COLOR } from '@renderer/lib/ui'
+import { isSuspended, NOT_JUDGED_COLOR } from '@renderer/lib/score'
 import { easeAnchor, setMeshSpacing, worstPerRegion, type Anchor, type BodyMesh, type RegionKey } from '@renderer/overlay/bodyMesh'
-import { meshIntensityOf, meshLook, type MeshLook } from '@renderer/overlay/meshLook'
+import { meshDimsBackdrop, meshIntensityOf, meshLook, type MeshLook } from '@renderer/overlay/meshLook'
 import { MeshPainter, type Hotspot, type RGB } from '@renderer/overlay/meshPaint'
 import { useAppStore } from '@renderer/state/store'
 
@@ -42,9 +43,9 @@ function stageRgb(stage: Stage): RGB {
   return themeColor(STAGE_COLOR[stage])
 }
 
-/** The overlay's base hue for the current settings and posture. */
-function overlayRgb(overlay: OverlaySettings, stage: Stage): RGB {
-  if (overlay.color === 'posture') return stageRgb(stage)
+/** The overlay's base hue for the current settings and posture (null stage = nothing judged). */
+function overlayRgb(overlay: OverlaySettings, stage: Stage | null): RGB {
+  if (overlay.color === 'posture') return stage === null ? themeColor(NOT_JUDGED_COLOR) : stageRgb(stage)
   if (overlay.color === 'custom') return hexToRgb(overlay.customColor)
   return hexToRgb(OVERLAY_PRESETS[overlay.color])
 }
@@ -93,7 +94,7 @@ export default function MeshOverlay({ hologram: hologramProp }: Props = {}): JSX
 
     const lookFor = (overlay: OverlaySettings): MeshLook => {
       const intensity = meshIntensityOf(overlay)
-      const holo = hologramProp ?? overlay.style === 'hologram'
+      const holo = hologramProp ?? meshDimsBackdrop(overlay)
       const key = `${intensity}|${holo}`
       if (!look || key !== lookKey) {
         look = meshLook(intensity, holo)
@@ -148,7 +149,9 @@ export default function MeshOverlay({ hologram: hologramProp }: Props = {}): JSX
       // ---- ease the body frame toward the latest detection (snapping on big jumps) ----
       anchor = easeAnchor(anchor, mesh.anchor, dtS > 0 ? 1 - Math.exp(-dtS / TAU_ANCHOR_S) : 0)
 
-      const stage: Stage = snapshot && snapshot.presence === 'active' ? snapshot.worstStage : 0
+      // suspended detectors report stage 0 without judging anything: neutral, not sage
+      const stage: Stage | null =
+        snapshot && snapshot.presence === 'active' ? (isSuspended(snapshot) ? null : snapshot.worstStage) : 0
       const want = overlayRgb(settings, stage)
       color = color ?? [...want]
       for (let k = 0; k < 3; k++) color[k] = ease(color[k], want[k], dtS, TAU_COLOR_S)

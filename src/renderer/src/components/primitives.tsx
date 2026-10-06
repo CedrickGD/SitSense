@@ -28,6 +28,7 @@ import type { Stage } from '@shared/posture'
 import { STAGE_COLOR } from '@renderer/lib/ui'
 import { scoreColor } from '@renderer/lib/score'
 import { fmtScore } from '@renderer/lib/format'
+import { focusWhenReady, initialFocusTarget } from '@renderer/lib/focus'
 import { Icon, type IconName } from './icons'
 
 // ───────────────────────────── shared class recipes ─────────────────────────────
@@ -842,11 +843,16 @@ export function Popover({
 
   useEffect(() => {
     if (!open || !anchor) return
-    if (autoFocus) {
-      floatingRef.current
-        ?.querySelector<HTMLElement>('[role="menuitem"], button:not([disabled]), input, textarea, select, [tabindex="0"]')
-        ?.focus()
-    }
+    // Floating's first commit is visibility:hidden at -9999 until its layout effect places
+    // it, and focus() on a hidden element does nothing — so focus from the next frame on,
+    // once the box is visible. `data-autofocus` marks the preferred target (Confirm's Cancel).
+    const cancelFocus = autoFocus
+      ? focusWhenReady(() => {
+          const root = floatingRef.current
+          if (!root || root.style.visibility === 'hidden') return null
+          return initialFocusTarget(root)
+        })
+      : () => undefined
     const onDown = (e: MouseEvent): void => {
       const t = e.target as Node
       if (!floatingRef.current?.contains(t) && !anchorRef.current?.contains(t)) onCloseRef.current('outside')
@@ -860,6 +866,7 @@ export function Popover({
     window.addEventListener('scroll', onScroll, true)
     window.addEventListener('blur', onResize)
     return () => {
+      cancelFocus()
       window.removeEventListener('mousedown', onDown)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('scroll', onScroll, true)
@@ -931,18 +938,8 @@ export function Menu({ trigger, items, align = 'left', placement = 'bottom', ari
     anchorRef.current?.querySelector<HTMLElement>('button, [tabindex]')?.focus()
   }
 
-  // opened by mouse or keyboard: focus the first item once the portal has rendered, so
-  // the arrow keys and Esc work immediately (Esc then returns focus to the trigger)
-  useEffect(() => {
-    if (!open) return
-    const raf = requestAnimationFrame(() => {
-      document
-        .getElementById(menuId)
-        ?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
-        ?.focus()
-    })
-    return () => cancelAnimationFrame(raf)
-  }, [open, menuId])
+  // opened by mouse or keyboard, Popover focuses the first enabled item once it is placed
+  // and visible, so the arrow keys and Esc work immediately (Esc returns to the trigger)
 
   const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
     const list = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled])'))
@@ -1050,11 +1047,22 @@ export function ConfirmPopover({
   align = 'end'
 }: ConfirmPopoverProps): JSX.Element {
   return (
-    <Popover open={open} onClose={onClose} anchorRef={anchorRef} placement={placement} align={align} role="dialog" ariaLabel={message} autoFocus={false}>
+    // Popover moves focus to Cancel (data-autofocus) once the box is visible; closing from
+    // inside hands focus back to the trigger (harmless if it's now disabled or gone)
+    <Popover open={open} onClose={onClose} anchorRef={anchorRef} placement={placement} align={align} role="dialog" ariaLabel={message}>
       <div className="flex w-64 flex-col gap-3 p-2">
         <p className="type-body text-text">{message}</p>
         <div className="flex justify-end gap-2">
-          <Button size="sm" variant="ghost" ringOn="card-2" onClick={onClose} autoFocus>
+          <Button
+            size="sm"
+            variant="ghost"
+            ringOn="card-2"
+            data-autofocus=""
+            onClick={() => {
+              onClose()
+              anchorRef.current?.focus()
+            }}
+          >
             {cancelLabel}
           </Button>
           <Button
@@ -1065,6 +1073,7 @@ export function ConfirmPopover({
             onClick={() => {
               onClose()
               onConfirm()
+              anchorRef.current?.focus()
             }}
           >
             {confirmLabel}

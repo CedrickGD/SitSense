@@ -25,6 +25,8 @@ const api: SitSenseApi = {
   aiListModels: (id) => ipcRenderer.invoke(IPC.aiListModels, id),
   aiReviewPosture: (req) => ipcRenderer.invoke(IPC.aiReviewPosture, req),
   aiChat: (req) => ipcRenderer.invoke(IPC.aiChat, req),
+  aiChatCancel: () => ipcRenderer.invoke(IPC.aiChatCancel),
+  aiCancelReview: (requestId) => ipcRenderer.invoke(IPC.aiCancelReview, requestId),
   getStatsRange: (days) => ipcRenderer.invoke(IPC.statsGetRange, days),
   snoozeBreak: (minutes) => ipcRenderer.invoke(IPC.breakSnooze, minutes ?? null),
   // no arguments cross: main decides what to check, download or install
@@ -43,6 +45,7 @@ const api: SitSenseApi = {
   onNavigate: (cb) => subscribe(IPC.navigate, cb as (...args: unknown[]) => void),
   onSystemResumed: (cb) => subscribe(IPC.systemResumed, cb as (...args: unknown[]) => void),
   onWindowVisibility: (cb) => subscribe(IPC.windowVisibility, cb as (...args: unknown[]) => void),
+  onWindowClosedToTray: (cb) => subscribe(IPC.windowClosedToTray, cb as (...args: unknown[]) => void),
   onSittingChanged: (cb) => subscribe(IPC.sittingChanged, cb as (...args: unknown[]) => void),
   onUpdateState: (cb) => subscribe(IPC.updateState, cb as (...args: unknown[]) => void)
 }

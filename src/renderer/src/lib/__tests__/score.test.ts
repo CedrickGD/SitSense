@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { IssueId, IssueSnapshot, PostureSnapshot, Stage } from '@shared/posture'
-import { issuePenalty, levelFromThresholds, postureScore, rawScore, scoreBand, scoreColor, ScoreSmoother } from '../score'
+import { isSuspended, issuePenalty, levelFromThresholds, postureScore, rawScore, scoreBand, scoreColor, ScoreSmoother } from '../score'
 
 type Issue = IssueSnapshot & { level?: number }
 
@@ -68,9 +68,20 @@ describe('postureScore gate', () => {
     ['paused', snapshot(), { paused: true }],
     ['camera error', snapshot(), { cameraError: 'denied' }],
     ['not running', snapshot(), { running: false }],
-    ['other camera', snapshot(), { baselineMismatch: true }]
+    ['other camera', snapshot(), { baselineMismatch: true }],
+    // the engine forces every stage to 0 while suspended: that is not a 100 (finding: view-changed drift)
+    ['detectors suspended', { ...snapshot({ recalibrationSuggested: true }), suspended: true }, {}]
   ])('%s → null', (_, snap, gate) => {
     expect(postureScore(snap as PostureSnapshot | null, {}, gate)).toBeNull()
+  })
+  it('the recalibration hint alone does not gate (detection resumes once the view is back; the engine withdraws the hint later)', () => {
+    expect(postureScore(snapshot({ recalibrationSuggested: true }))).toBe(100)
+    expect(postureScore({ ...snapshot({ recalibrationSuggested: true }), suspended: false } as PostureSnapshot)).toBe(100)
+  })
+  it('isSuspended reads the optional field loosely', () => {
+    expect(isSuspended(null)).toBe(false)
+    expect(isSuspended(snapshot())).toBe(false)
+    expect(isSuspended({ ...snapshot(), suspended: true })).toBe(true)
   })
 })
 

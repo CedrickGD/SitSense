@@ -195,8 +195,10 @@ The sidebar runs the full window height. The top bar only spans the content colu
   1. **Monitoring pill** (e1 card, 44 px, full width): a status dot plus a label, and a 28 px icon button on the right.
      * Monitoring: sage dot with a 2 s soft pulse, "Monitoring", button `pause` (opens the pause menu: *15 minutes · 30 minutes · 60 minutes · Until I resume*).
      * Paused: slate dot, "Paused · 12:41" (Plex Mono countdown) or "Paused" (until resumed), button `play` "Resume".
-     * Camera problem: coral dot, "Camera unavailable", button `chevron-right` → Live.
+     * Camera problem (or the pose model failed to load): coral dot, "Camera unavailable", button `chevron-right` → Live.
      * Not set up: amber dot, "Not set up", button `chevron-right` → `openSetup()`.
+     * Set up for another camera (the baseline is not applied, nothing is judged): amber dot, "Nudges off · new camera", button `chevron-right` → Live (its banner offers redo / keep).
+     * Priority: paused > camera > not set up > new camera > monitoring.
   2. **Privacy badge** (32 px row, `caption text-dim`): `shield` icon + "On-device". With a cloud AI enabled it reads "On-device · AI: Gemini" (the connection label, truncated to 14 chars). The tooltip text comes from the existing `aiDisclosure()` / `ON_DEVICE_TIP`. Clicking it opens Settings › Privacy & data.
 
 **Compact rail (64 px).** The brand shows only the glyph. Nav items become 44×44 icons with
@@ -326,7 +328,7 @@ from how far you are from your saved good posture right now." The body is in thr
 **Zone A: score and status** (horizontal: ring on the left, text on the right; stacked under 300 px card width):
 
 * **Score ring**: 112 px (88 compact). A 10 px stroke track `white/6`, and a value arc in the band color (§3.4.1) with round caps. It animates 400 ms ease-out on change. The center holds the number (`score`) with `/100` below it in `caption text-faint`. When `score === null`, the center shows `—` and the arc is empty.
-* **Status word** (`h2`): `Good`, the worst issue's label (`Slouching`, `Head forward`, `Leaning to one side`, `Too close to screen`), `Paused`, `Away`, `Not set up`, or `Camera off`. It crossfades over 200 ms.
+* **Status word** (`h2`): `Good`, the worst issue's label (`Slouching`, `Head forward`, `Leaning to one side`, `Too close to screen`), `Paused`, `Away`, `View changed`, `Not set up`, or `Camera off`. It crossfades over 200 ms. `View changed` (`snapshot.suspended`: the view is far off the setup distance, every detector paused — detection.md §5) comes right after Away and before any issue; its sub-line is "Posture isn't judged until you redo setup." and the ring stays empty (never a sage 100).
 * Under it: a stage pill (`slight` / `clear` / `severe`) when an issue is active, then the sub-line in `value 13 text-dim`: `47 min aligned` (the current good streak) or `for 2m 10s` (the current issue's duration).
 * If the baseline is unverified (`calibration.verified === false`): an amber-outlined chip `Unverified baseline` under the status. Its tooltip reads "SitSense couldn't confirm your saved posture from this angle. Redo setup for an accurate score." and clicking it opens setup.
 
@@ -338,7 +340,7 @@ then a gauge track 6 px tall.
 |---|---|---|---|---|---|
 | Head position | `neckFwd` (°) | headForward | −10 … 32 | 10, 18, 28 | `+4° forward` · `level with baseline` (|v| < 1) · `3° back` |
 | Back angle | `trunkFwd` (°); if null, `drop` (cm) and the label becomes **Sitting height** | sink | −10 … 32 (°) · −5 … 18 (cm) | 10, 18, 28 · 5, 10, 16 | `6° forward` / `4° reclined` / `level` · `3 cm lower` / `same` |
-| Side lean | `lateral` (°) | lean | −20 … 20 (centered) | ±6, ±11, ±18 | `2° to your left` / `centered` |
+| Side lean | `lateral` (°) | lean | −20 … 20 (centered); −25 … 25 when `readout.lateralFrom === 'neck'` | ±6, ±11, ±18 (trunk) · ±8, ±14, ±22 (neck tilt) | `2° to your left` / `centered` |
 | Screen distance | `forward` (cm) | tooClose | −15 … 22 | 7, 13, 19 | `5 cm closer` / `4 cm farther` / `same` |
 
 Gauge rendering:
@@ -354,7 +356,10 @@ Gauge rendering:
 The gauges show only while monitoring is live (`!paused && running && !cameraError &&
 calibrated && presence === 'active'`). Otherwise Zone B shows a single-line reason in the
 same space: `Paused — gauges resume with monitoring.` / `Waiting for you to sit in view.` /
-`Set up your posture to see live measurements.` (with a primary `Set up posture` button).
+`Your view changed a lot since setup — redo setup to measure again.` (suspended, with a
+`Redo posture setup` button) / `Set up your posture to see live measurements.` (with a
+primary `Set up posture` button). While suspended the overlays' posture color is neutral
+slate, never sage.
 
 **Zone C** (only when space allows, card height > 420): the view chip (`Front view` /
 `Angled view` / `Side view`) and `Setup 2 days ago`.
@@ -365,7 +370,7 @@ This is a pure function in `lib/score.ts`, unit-tested.
 
 Inputs: `snapshot: PostureSnapshot`, `settings.issues[i].enabled`.
 
-1. **Gate.** `score = null` if `!snapshot.calibrated`, `presence === 'away'`, paused, camera error, or no snapshot.
+1. **Gate.** `score = null` if `!snapshot.calibrated`, `presence === 'away'`, `snapshot.suspended`, paused, camera error, or no snapshot.
 2. **Continuous severity per enabled issue** `s_i ∈ [0, 3.5]`:
    * If the engine provides `IssueSnapshot.level` (new optional field, §11), use `s_i = clamp(level, 0, 3.5)`.
    * Otherwise use `s_i = stage_i`, an integer.
@@ -731,8 +736,8 @@ away, or before setup. Copy in §10.3.
 | Card (span) | Contents |
 |---|---|
 | **Status hero** (12) | The `spark` icon, then the title `Use a connected AI model` + the master toggle, and the existing subtitle. A status line: `Off — SitSense sends nothing to an AI model.` / `On · Primary: Gemini (gemini-3.5-flash-lite) · 2 fallbacks` / `On, but no connection works yet` (amber). |
-| **What's sent** (7) | Two **option cards** side by side (radio semantics, 112 px tall), each with a small illustration: `Pose sketch` "Lines and dots only — no camera image." (default) and `Camera snapshot` "A small, downscaled frame from your camera." The selected card gets a sage ring and a check. Under them, the existing disclosure line. |
-| **Where AI helps** (5) | Toggles: `Double-check posture setup` (`useInSetup`), `Coach chat` (`useInCoach`). Hint: "Never runs in the background or while paused." |
+| **What's sent** (7) | Two **option cards** side by side (radio semantics, 112 px tall), each with a small illustration: `Pose sketch` "Lines and dots only — no camera image." (default) and `Camera snapshot` "A small, downscaled frame from your camera." The selected card gets a sage ring and a check. Under them, the disclosure line (`shareDisclosure`), which describes posture checks and coach messages separately: a posture check or setup review sends the sketch/still plus the measured angles; a coach message sends the words, the recent conversation and the ticked context — never an image; nothing in the background; while paused nothing from the camera leaves the PC, coach questions are still answered. |
+| **Where AI helps** (5) | Toggles: `Double-check posture setup` (`useInSetup`), `Coach chat` (`useInCoach`). Hint: "Never runs in the background. While paused, only coach questions are answered — nothing from the camera is sent." |
 | **Connections** (12) | The existing `AiModelsSection` list and form, restyled: each connection is a row card (e2 on hover) with the provider glyph, label, model (Plex Mono), status dot + `Tested 2 min ago`, the `Primary` badge, and actions (`Test`, `Edit`, `•••` menu with Move up / Move down / Remove). `+ Add connection` is a dashed `hairline-strong` card button at the end of the list, which expands the form inline in a full-width card. |
 
 #### Privacy & data: "What stays on this PC and what can leave it"
@@ -740,7 +745,7 @@ away, or before setup. Copy in §10.3.
 | Card (span) | Contents |
 |---|---|
 | **Stays on this PC** (6) | A check list (sage `check` icons): "Your camera image — analyzed live, never saved", "Your posture numbers and setup", "Your daily history (90 days)", "Your coach chat". |
-| **Can leave this PC** (6) | When AI is off: the `lock` icon + "Only an update check. With AI models off, the only request SitSense makes is asking GitHub for its latest version." (with automatic update checks off: "Nothing. With AI models and automatic update checks off, SitSense makes no network requests."). When on: "Only when you ask the coach, check your posture or run setup: {disclosure} sent to {recipients}." plus the ghost `Change in AI models`. Under it, after a hairline, a caption on update checks: "Update checks: SitSense asks GitHub for its latest version shortly after it starts and every 6 hours. No posture data, camera image or settings are sent." (auto-check off: "…only when you press “Check for updates” in About…") and a dim `Updates →` link to About. |
+| **Can leave this PC** (6) | When AI is off: the `lock` icon + "Only an update check." and, for a portable copy, "With AI models off, the only request SitSense makes is asking GitHub for its latest version." — an installed copy (or before the update status has loaded) says "With AI models off, SitSense only talks to GitHub: it asks for its latest version and downloads a newer one in the background when there is one." (with automatic update checks off: "Nothing. With AI models and automatic update checks off, SitSense makes no network requests."). When on: "Only when you ask the coach, check your posture or run setup: {disclosure} sent to {recipients}." plus the ghost `Change in AI models`. Under it, after a hairline, a caption on update checks: portable "Update checks: SitSense asks GitHub for its latest version shortly after it starts and every 6 hours. No posture data, camera image or settings are sent."; installed "…every 6 hours, and downloads a newer version from GitHub in the background when there is one. No posture data…" (auto-check off: "…only when you press “Check for updates” in About…", installed adds "(a newer version then downloads right away)") and a dim `Updates →` link to About. |
 | **Data on this PC** (12) | Rows with a size or count in Plex Mono and an action: `Posture history` · `12 days · 84 KB` · `Delete history` (danger, confirm); `Coach chat` · `38 messages` · `Clear chat` (danger, confirm); `Your saved posture` · `Set up 2 days ago` · `Delete and redo setup` (danger, confirm, then opens setup); `AI keys` · `2 keys, encrypted with Windows` · (none; removed per connection). |
 | **Reset** (12) | `Reset all settings` (danger) — "Puts every setting back to its default. Your history and AI keys stay." Confirm popover. Needs IPC `settingsReset()`. |
 
@@ -749,8 +754,8 @@ away, or before setup. Copy in §10.3.
 | Card (span) | Contents |
 |---|---|
 | **SitSense** (6) | A 64 px breathing glyph, `h3` "SitSense", `Version 0.2.0` in Plex Mono (`value-lg`, text), a `caption text-faint` channel line (`Installed · updates from GitHub` / `Portable · updates from GitHub` / `Development build`), and "Posture coaching that runs on your PC." |
-| **Updates** (6) | A status row: a 28 px round tone icon, a `body` 500 title and a `caption` line (coral for errors, release notes clamped to 3 lines), and one `sm` button on the right. States: `Not checked yet` (info) + `Check for updates` · `Checking for updates…` (spinner, button loading) · `You’re up to date` (sage check) + "SitSense 0.2.0 is the latest version. Checked 3 min ago." · `Version 0.3.0 is available` (amber spark) + the release notes + primary `Download` → (portable: opens the GitHub release page) / `Download update` (installed) · `Downloading version 0.3.0` + a 6 px progress bar and the percent in Plex Mono · `Version 0.3.0 is ready` (sage refresh) + "Restart to finish (a few seconds), or it installs when SitSense quits." + primary `Restart to update` · `Update didn’t go through` (coral alert) + the friendly message + `Try again` · dev build: `Updates come with the installed app`, button disabled. Then a hairline and the toggle row `Check automatically` — "Asks GitHub for the latest version — no posture data is sent." Portable adds a footer caption: "Portable copy: new versions download from the GitHub release page — replace this exe with the new one." |
-| **Keyboard shortcuts** (6) | A table: `Ctrl+1…4` places, `Ctrl+,` settings, `Ctrl+L` ask the coach, `Ctrl+Shift+P` pause or resume, `Esc` leave setup. |
+| **Updates** (6) | A status row: a 28 px round tone icon, a `body` 500 title and a `caption` line (coral for errors, release notes clamped to 3 lines), and one `sm` button on the right. States: `Not checked yet` (info) + `Check for updates` · `Checking for updates…` (spinner, button loading) · `You’re up to date` (sage check) + "SitSense 0.2.0 is the latest version. Checked 3 min ago." · `Version 0.3.0 is available` (amber spark) + the release notes + primary `Download` → (portable: opens the GitHub release page) / `Download update` (installed) · `Downloading version 0.3.0` + a 6 px progress bar and the percent in Plex Mono · `Version 0.3.0 is ready` (sage refresh) + "Restart to finish (a few seconds), or it installs when SitSense quits." + primary `Restart to update` · `Update didn’t go through` (coral alert) + the friendly message + `Try again` · dev build: `Updates come with the installed app`, button disabled. Then a hairline and the toggle row `Check automatically` — portable "Asks GitHub for the latest version — no posture data is sent."; installed "Asks GitHub for the latest version and downloads new versions in the background — no posture data is sent." Portable adds a footer caption: "Portable copy: new versions download from the GitHub release page — replace this exe with the new one." |
+| **Keyboard shortcuts** (6) | A table: `Ctrl+1…4` places, `Ctrl+,` settings, `Ctrl+L` ask the coach (from any screen: opens Coach with the message box focused), `Ctrl+Shift+P` pause or resume, `Ctrl+W` hide to the tray, `Esc` leave setup. `Ctrl+M` minimizes (not listed). The packaged build has no application menu, so the renderer handles Ctrl+W / Ctrl+M itself. |
 | **Credits** (6) | Four tiles in a 2×2 grid: Pose tracking — MediaPipe (Apache 2.0) · Display type — Bricolage Grotesque · Interface type — Hanken Grotesk · Numbers — IBM Plex Mono (SIL OFL 1.1). |
 
 ---
@@ -788,7 +793,7 @@ stepper, and large coaching type. It enters with 220 ms fade + scale 0.98 → 1 
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-* **Header (56 px)**: `[spine 20] Posture setup` (`title`); the **stepper** centered: three nodes (24 px circles; done = sage fill + `check`, current = sage ring + number, upcoming = `white/10` ring + number in `text-faint`), labels `Camera`, `Posture`, `Saved` (`caption`, current in `text`), connected by 48 px hairlines (sage when passed). On the right, the window controls (minimize, close-to-tray) after the **Exit setup** button (ghost `sm`, `close` icon).
+* **Header (56 px)**: `[spine 20] Posture setup` (`title`); the **stepper** centered: three nodes (24 px circles; done = sage fill + `check`, current = sage ring + number, upcoming = `white/10` ring + number in `text-faint`), labels `Camera`, `Posture`, `Saved` (`caption`, current in `text`), connected by 48 px hairlines (sage when passed). On the right, the window controls (minimize, close-to-tray) after the **Exit setup** button (ghost `sm`, `close` icon). Close-to-tray (the ✕ or Ctrl+W) also leaves setup (main sends `window:closed-to-tray`), so nudges resume in the tray; a minimize keeps setup open, but no coaching session, raised frame rate or review image runs while the window is hidden — coaching starts over when it is shown.
 * **Exit**: `Esc` or the button. Nothing is saved; `detectionController.cancelSetup()`, return to `returnTo`. If a baseline existed, it is kept. If none exists, Live shows its not-set-up state. No confirm dialog, except during *capturing*: "Leave setup? Your posture hasn't been saved yet." with `Leave` / `Keep going`.
 * **Body**: a 12-column grid, 32 px padding. The camera is cols 1–7, and the coach panel cols 8–12 (no card background; it sits on the setup background with 8 px left padding for big type).
 * **compact (780×580)**: the header stepper shows numbers only; the camera is cols 1–6 at 16:9 (~330 px wide), the instruction drops to `h2` (26), the checklist rows go to 28 px, and the "anyway" button moves under the progress. Nothing scrolls at 780×580.
@@ -806,9 +811,9 @@ Goal: make sure SitSense can measure what it needs before coaching begins.
   | Camera | frames arriving | `Camera is on` | `Starting the camera…` / the camera error |
   | You | `inView` good | `I can see you` | `Move so your head and a shoulder are in the picture` |
   | Hips | features include hips (`trunkFwd` measurable) | `I can see your hips — full tracking` | amber: `I can't see your hips — I won't be able to tell if you slump down. Tilt the camera down a little or sit a bit farther back.` |
-  | Angle | always | `Side view · works great` / `Front view` / `Angled view` | — |
+  | Angle | always | `Side view · works great` (only for a side view the back can be checked from) / `Side view` / `Front view` / `Angled view` | — |
 
-* Primary `lg` button **Start coaching** (Enter), enabled once *You* has been good for 1 s. If *Hips* is amber, the button stays enabled (any-angle requirement), but a secondary line warns: "Without your hips in view, setup needs an AI second opinion to confirm your back — or you can improve the view now." The AI part changes to "connect an AI model in Settings for one" when there is none.
+* Primary `lg` button **Start coaching** (Enter), enabled once *You* has been good for 1 s. If *Hips* is amber, the button stays enabled (any-angle requirement), but a secondary line warns: "Without your hips in view, setup needs an AI second opinion to confirm your back — or you can improve the view now." The AI part changes with the AI state (`aiSetupState`): none "connect an AI model for one", turned off "turn your AI model back on", needs setup (a switched-on connection without its key, model or server address) "finish setting up your AI model", available but off for setup "turn your AI model on for setup". From a view that sees the hips but not the back angle, the lead is "From this view I can’t confirm your back angle myself".
 * If a valid baseline exists and this is a redo, Step 1 shows the line "Redoing setup replaces your saved posture once the new one is confirmed."
 
 ### 7.3 Step 2: Posture (the coach)
@@ -850,6 +855,7 @@ An essential check is `unknown` (e.g. hips out of view, so a slump can't be rule
 
 1. **Auto-save is blocked.** `holding` does not start while `unverified.length > 0`, unless an AI reviewer is available for setup. The instruction becomes, in this order:
    * `I can't see your hips from here, so I can't check whether you're slumped. Tilt the camera down a little or sit a bit farther back.` (hips out of view)
+   * Camera fixes by `setup.viewFix` (detection's reason): `front` "I can't judge your back angle from straight in front." / "Turn the camera to your side — side-on works best — or let an AI model check it." · `profile` (angled or not-quite-side) "I can't judge your back angle from this angle yet." / "Turn the camera further to your side — about 90°, squarely side-on — or let an AI model check it." · `level` (the hip line says the camera is rolled) "Your camera looks tilted." / "So I can't confirm your back angle. Straighten the camera so it sits level — or let an AI model check it." Posture fixes (`lean`: sit back and look ahead; `head`: the head a little past the limit) keep the session's own instruction.
    * the generic form: `I can't check your {what} from this angle. Show me a bit more of you.`
 2. **With an AI reviewer** (`aiReviewsSetup` true): once every *measurable* check is good and held, setup asks the model. The image plus the measurements go out, and the request marks the unverified checks as *must judge*. Only an AI `good` verdict saves, and the result is `verified: true`, attributed to the model. AI `adjust`: its first instruction becomes the primary (attributed), and coaching continues. After 2 rejections, auto-capture stops until the user changes something (the existing `autoCapture: false`), and the copy is `<model> still sees a problem: {instruction}`.
 3. **AI unreachable**: the note `Couldn't reach <label> — I still can't check your {what}.` The flow stays blocked (it does **not** fall back to passing). Only *Save anyway* remains, after 20 s.
@@ -870,7 +876,7 @@ The reviewing card replaces the progress area. It is e2, full panel width:
 * The Spine Glyph draws in (stroke-dash, 600 ms) at 120 px, sage, then breathes.
 * Headline `h1`: **This is your good posture.**
 * The readout (`value 15 text-dim`), from `baselineReadout()`, e.g. `Neck 9° · Trunk upright · Shoulders level — seen from the side`.
-* **Verification badge** (chip): `Verified by on-device AI` (sage) / `Verified by on-device AI and Gemini` (sage) / `Not verified — saved anyway` (amber).
+* **Verification badge** (chip): `Verified by on-device AI` (sage) / `Verified by on-device AI and Gemini` (sage; the on-device judge verified the capture and the model confirmed it) / `Verified by Gemini` (sage; the model judged what the on-device judge could not — `reviewResult.covered`) / `Not verified — saved anyway` (amber).
 * The AI's summary in quotes with the model name, when one ran.
 * Buttons: the primary `lg` **Start monitoring** (closes setup → Live) and the ghost `Redo setup` (back to Step 1).
 * Footnote `caption text-faint`: `Only these numbers are stored, on this device.`
@@ -1039,7 +1045,7 @@ ai: { …, useInCoach: true, coachContext: { live: true, today: true, baseline: 
 ### 10.1 Shell
 
 * Nav: `Live` · `Coach` · `History` · `Settings`. Coach badge: `AI`.
-* Monitoring pill: `Monitoring` · `Paused · {m:ss}` · `Paused` · `Camera unavailable` · `Not set up`. Buttons: `Pause` (tooltip "Pause monitoring") · `Resume` · pause menu `15 minutes` / `30 minutes` / `60 minutes` / `Until I resume`.
+* Monitoring pill: `Monitoring` · `Paused · {m:ss}` · `Paused` · `Camera unavailable` · `Not set up` · `Nudges off · new camera`. Buttons: `Pause` (tooltip "Pause monitoring") · `Resume` · pause menu `15 minutes` / `30 minutes` / `60 minutes` / `Until I resume`.
 * Privacy badge: `On-device` · `On-device · AI: {label}`.
 * Boot: `Starting SitSense…`.
 * Tray menu item: `Redo posture setup` (was `Recalibrate`).
@@ -1092,16 +1098,16 @@ Action button: `Snooze 15 min`.
 * Posture setup card: `Your good posture` · `Set up {relative} · {view} · Verified by on-device AI` / `… and {label}` / `Not verified` / `Not set up yet` · `Redo it after moving your camera, desk or chair.`
 * Breaks: `Remind me to take breaks` · `Remind me every` · `A break counts after` · `SitSense notices when you leave your desk — walking away for {L} minutes counts as a break. No need to tell it.`
 * Notification preview: `Preview` · `Send a test notification`.
-* AI: `Pose sketch` / `Lines and dots only — no camera image.` · `Camera snapshot` / `A small, downscaled frame from your camera.` · `Double-check posture setup` · `Coach chat` · `Never runs in the background or while paused.` · status `Off — SitSense sends nothing to an AI model.` / `On · Primary: {label} ({model})` (+ ` · {n} fallback(s)`) / `On, but no connection works yet` · `+ Add connection`.
+* AI: `Pose sketch` / `Lines and dots only — no camera image.` · `Camera snapshot` / `A small, downscaled frame from your camera.` · `Double-check posture setup` · `Coach chat` · `Never runs in the background. While paused, only coach questions are answered — nothing from the camera is sent.` · status `Off — SitSense sends nothing to an AI model.` / `On · Primary: {label} ({model})` (+ ` · {n} fallback(s)`) / `On, but no connection works yet` · `+ Add connection`.
 * Privacy: `STAYS ON THIS PC` items (§6.2) · `CAN LEAVE THIS PC` · `Only an update check.` / `Nothing.` (see §6.2) · `Only when you ask the coach, check your posture or run setup: {disclosure}` · `Change in AI models` · data rows `Posture history` / `Delete history` · `Coach chat` / `Clear chat` · `Your saved posture` / `Delete and redo setup` · `AI keys` / `{n} keys, encrypted with Windows` · `Reset all settings` / `Puts every setting back to its default. Your history and AI keys stay.` · confirms: `Delete all posture history? This can't be undone.` · `Delete your saved posture and start setup?` · `Reset every setting to its default?`
-* About: `Posture coaching that runs on your PC.` · `Updates` card copy (§6.2) · `Check automatically` / `Asks GitHub for the latest version — no posture data is sent.` · `Keyboard shortcuts` · credits (§6.2).
+* About: `Posture coaching that runs on your PC.` · `Updates` card copy (§6.2) · `Check automatically` / `Asks GitHub for the latest version — no posture data is sent.` (portable) / `Asks GitHub for the latest version and downloads new versions in the background — no posture data is sent.` (installed) · `Keyboard shortcuts` · credits (§6.2).
 * Sidebar footer (§2.3): `v0.2.0` (caption, text-faint, right of the privacy badge → Settings › About; an amber 6 px dot while a newer version is available) · while an update is ready, above the monitoring pill: `Update ready` + `Restart` (sage-soft, 36 px, refresh icon; tooltip "SitSense 0.3.0 is downloaded. Restart to install it — takes a few seconds."; compact rail: a 40 px refresh icon button with a sage dot).
 
 ### 10.6 Setup
 
 * Header: `Posture setup` · steps `Camera` / `Posture` / `Saved` · `Exit setup` · leave confirm `Leave setup? Your posture hasn't been saved yet.` [`Leave`] [`Keep going`].
 * Step 1: `Let's check your camera.` · `Sit where you normally work. Any camera angle is fine — your head and at least one shoulder need to be in the picture.` · rows (§7.2) · `Start coaching` · warning `Without your hips in view, setup needs an AI second opinion to confirm your back — or you can improve the view now.` (no AI: `… — connect an AI model in Settings for one, or improve the view now.`) · redo line `Redoing setup replaces your saved posture once the new one is confirmed.`
-* Step 2: `STEP 2 OF 3` · `Suggested by on-device AI` · `Suggested by {model}` · `Essentials checked: {n} of {m}` · status texts `can't check yet` / `not visible from here` · `Hold it…` · `Capturing your posture…` · `Asking {label} for a second opinion…` · `That's it — hold still.` · slump: `You're sliding down in your chair — scoot your hips back and sit up tall.` · unverified: `I can't see your hips from here, so I can't check whether you're slumped. Tilt the camera down a little or sit a bit farther back.` / `I can't check your {what} from this angle. Show me a bit more of you.` · AI hint card `Want a second opinion? Connect an AI model and it can check what the camera can't.` / `Open AI settings` · unreachable `Couldn't reach {label} — I still can't check your {what}.` · rejected twice `{model} still sees a problem: {instruction}` · `Save this posture anyway — unverified` / `SitSense couldn't confirm it. Your score will be marked unverified until you redo setup.`
+* Step 2: `STEP 2 OF 3` · `Suggested by on-device AI` · `Suggested by {model}` · `Essentials checked: {n} of {m}` · status texts `can't check yet` / `not visible from here` · `Hold it…` · `Capturing your posture…` · `Asking {label} for a second opinion…` · `That's it — hold still.` · slump: `You're sliding down in your chair — scoot your hips back and sit up tall.` · unverified: `I can't see your hips from here, so I can't check whether you're slumped. Tilt the camera down a little or sit a bit farther back.` / `I can't check your {what} from this angle. Show me a bit more of you.` · AI hint card `Want a second opinion? Connect an AI model and it can check what the camera can't.` / `Your AI model is turned off. Turn it on…` / `Your AI model needs a key or a model — finish it in AI settings and it can check what the camera can’t.` / `Open AI settings` · unreachable `Couldn't reach {label} — I still can't check your {what}.` · rejected `REVIEW_MAX_AUTO` (3) times `{model} still sees a problem: {instruction}` · `Save this posture anyway — unverified` / `SitSense couldn't confirm it. Your score will be marked unverified until you redo setup.`
 * Review card: `Second opinion` · `Looking at your posture…` · `Still looking — some models take a moment.` · `Skip` · `Looks good` · `Adjust`.
 * Step 3: `This is your good posture.` · badges `Verified by on-device AI` / `Verified by on-device AI and {label}` / `Not verified — saved anyway` · `Start monitoring` · `Redo setup` · `Only these numbers are stored, on this device.` · `Couldn't save your posture.` / `Redo setup to try again.`
 

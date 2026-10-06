@@ -5,7 +5,7 @@
 
 import { useId, useLayoutEffect, useRef, useState, type CSSProperties, type JSX, type RefObject } from 'react'
 import { useAppStore } from '@renderer/state/store'
-import { usableConnections } from '@renderer/components/CameraFeed'
+import { usableConnections } from '@renderer/ai/helpers'
 import { Button, Card, CardHeader, FIELD_CLASS, IconButton, LinkButton, ThinkingDots } from '@renderer/components/primitives'
 import { useCoachStore } from '@renderer/screens/coach/coachStore'
 import { Icon } from '@renderer/components/icons'

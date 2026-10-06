@@ -28,6 +28,17 @@ import {
   LAT_MAX_YAW,
   LM,
   PPM_MIN_SEGMENTS,
+  PRESENCE_BASELINE_DEPTH_ADD_M,
+  PRESENCE_BASELINE_DEPTH_CAP_M,
+  PRESENCE_BASELINE_DEPTH_RATIO,
+  PRESENCE_MAX_DEPTH_M,
+  PRESENCE_NECK_MAX,
+  PRESENCE_ROLL_AT_NECK_MAX,
+  PRESENCE_ROLL_FULL_UNTIL,
+  PRESENCE_PITCH_MAX,
+  PRESENCE_PITCH_MIN,
+  PRESENCE_SHOULDER_TILT_MAX,
+  PRESENCE_TRUNK_MIN_M,
   SHOULDER_LINE_MIN_M,
   SHOULDER_CAMERA_MAX_YAW,
   UP_FRAME_MAX_TILT,
@@ -49,6 +60,7 @@ import {
 } from './constants'
 import type {
   Frame,
+  FrameReject,
   LateralAxisSource,
   Landmark,
   NeckLatRef,
@@ -103,6 +115,21 @@ export interface ExtractOptions {
   hips?: boolean
   /** horizontal field of view assumed for metric depth and the viewing-ray correction (default HFOV_ASSUMED) */
   hfovDeg?: number
+  /**
+   * `up`'s pitch is measured (thigh gravity, or a saved baseline with thigh or hip-line gravity,
+   * baselinePitchKnown): the presence check then also requires neck and trunk within PRESENCE_NECK_MAX of it,
+   * which rejects a figure lying flat in any orientation. Default: upSource === 'body'. Never
+   * set it for an estimate whose pitch was assumed (camera-only, a hip line facing the camera
+   * during setup): a user leaning toward a steep camera would read as lying down.
+   */
+  gravityKnown?: boolean
+  /**
+   * The saved baseline's scale (`CalibrationBaseline.ppm`, this camera): the presence depth
+   * bound then follows the user's own distance (presenceMaxDepth) instead of the absolute
+   * PRESENCE_MAX_DEPTH_M. The ratio of two depths read through the same lens does not depend on
+   * its field of view.
+   */
+  baselinePpm?: number
   /**
    * Lateral features are measured while the body yaw is below this (default LAT_MAX_YAW).
    * The engine passes a little more and gates with its smoothed yaw instead, so per-frame
@@ -416,13 +443,32 @@ function solve3(A: number[][], b: number[]): Vec3 | null {
 // ---------------------------------------------------------------------------
 // presence (§2)
 
-/** §2: pose + world landmarks + head seen (nose or an ear) + at least one shoulder seen. */
+/**
+ * §2: pose + world landmarks + head seen (nose or an ear) + at least one shoulder seen, and
+ * the pose is plausibly the user at the screen (presenceReject). Measured without a known
+ * gravity, as isGoodFrame always is.
+ */
 export function isGoodFrame(frame: Frame): boolean {
-  const c = toCtx(frame)
-  return c !== null && goodCtx(c)
+  return frameReject(frame) === null
 }
 
-function goodCtx(c: Ctx): boolean {
+/**
+ * Why the frame is BAD (§2), or null when it is GOOD. `opts` as for extractFeatures: a
+ * measured gravity (ExtractOptions.gravityKnown) makes the uprightness check exact.
+ */
+export function frameReject(frame: Frame, opts: ExtractOptions = {}): FrameReject | null {
+  const c = toCtx(frame, opts.hfovDeg, opts.hips ?? true)
+  return c ? rejectCtx(c, knownUp(opts), opts.baselinePpm) : 'no-pose'
+}
+
+/** The gravity the presence check may rely on (ExtractOptions.gravityKnown), else null. */
+function knownUp(opts: ExtractOptions): Vec3 | null {
+  if (!opts.up) return null
+  const known = opts.gravityKnown ?? opts.upSource === 'body'
+  return known ? unit(opts.up) : null
+}
+
+function inViewCtx(c: Ctx): boolean {
   const head = seenOf(c, LM.nose) || seenOf(c, LM.leftEar) || seenOf(c, LM.rightEar)
   const shoulder = seenOf(c, LM.leftShoulder) || seenOf(c, LM.rightShoulder)
   // the neck vector needs an ear and a shoulder whose positions are not
@@ -432,6 +478,102 @@ function goodCtx(c: Ctx): boolean {
     (trustOf(c, LM.leftShoulder) > 0 || trustOf(c, LM.rightShoulder) > 0)
   // and enough seen segments to measure the scale (distance, position metrics)
   return head && shoulder && geometry && c.ppm !== null
+}
+
+function rejectCtx(c: Ctx, known: Vec3 | null = null, baselinePpm?: number): FrameReject | null {
+  return inViewCtx(c) ? presenceReject(c, known, baselinePpm) : 'not-in-view'
+}
+
+/**
+ * Farthest plausible shoulder depth (m, perspective fit at the assumed FOV, focal length `f`)
+ * of the user. Without a baseline: PRESENCE_MAX_DEPTH_M. With the scale of a baseline of this
+ * camera (its depth D_b): D_b · PRESENCE_BASELINE_DEPTH_RATIO, at least
+ * D_b + PRESENCE_BASELINE_DEPTH_ADD_M, at most PRESENCE_BASELINE_DEPTH_CAP_M — tighter than the
+ * absolute bound for a user who sat close (a figure or a person behind them reads a multiple
+ * of their depth, whatever the lens), looser for one who sat far from a wide-angle webcam.
+ */
+export function presenceMaxDepth(f: number, baselinePpm?: number): number {
+  if (!(typeof baselinePpm === 'number' && Number.isFinite(baselinePpm) && baselinePpm > 0)) return PRESENCE_MAX_DEPTH_M
+  const db = f / baselinePpm
+  return Math.min(
+    PRESENCE_BASELINE_DEPTH_CAP_M,
+    Math.max(db * PRESENCE_BASELINE_DEPTH_RATIO, db + PRESENCE_BASELINE_DEPTH_ADD_M)
+  )
+}
+
+/**
+ * The most the shoulder line may be tilted from horizontal (deg) when the body is reclined (or
+ * hunched) `reclineDeg` in its sagittal plane: PRESENCE_SHOULDER_TILT_MAX up to
+ * PRESENCE_ROLL_FULL_UNTIL, then linearly down to PRESENCE_ROLL_AT_NECK_MAX at PRESENCE_NECK_MAX.
+ * A seated user leans far sideways only while fairly upright, and lies far back only with the
+ * shoulders roughly level. A figure lying flat on the desk at an angle to the view, seen through
+ * a wrong camera pitch, looks reclined AND rolled at once (Implementation notes).
+ */
+function rollMaxAt(reclineDeg: number): number {
+  const k = clamp((reclineDeg - PRESENCE_ROLL_FULL_UNTIL) / (PRESENCE_NECK_MAX - PRESENCE_ROLL_FULL_UNTIL), 0, 1)
+  return PRESENCE_SHOULDER_TILT_MAX + k * (PRESENCE_ROLL_AT_NECK_MAX - PRESENCE_SHOULDER_TILT_MAX)
+}
+
+const goodCtx = (c: Ctx): boolean => rejectCtx(c) === null
+
+/**
+ * Is this pose plausibly the user sitting at the screen? (§2; Implementation notes, "Presence
+ * plausibility".) MediaPipe finds a "person" in anything person-like — a figure printed on a
+ * desk mat, a poster, someone across the room — and reconstructs it at human size. Two
+ * physical tests, both robust to the unknown camera pitch:
+ * 1. Distance: the shoulders’ perspective-fit depth is at most presenceMaxDepth —
+ *    PRESENCE_MAX_DEPTH_M, or relative to the baseline’s own depth (ExtractOptions.baselinePpm).
+ *    A small figure, reconstructed at human size, lands far away.
+ * 2. Uprightness. Webcams are level (roll ≲ 3°) at an unknown pitch, so the pose must be
+ *    upright — neck (shoulder midpoint → ear point) and trunk (hip → shoulder, a hip seen)
+ *    within PRESENCE_NECK_MAX of up, and the shoulder line within the roll budget (rollMaxAt:
+ *    PRESENCE_SHOULDER_TILT_MAX while fairly upright, less the farther the body reclines) —
+ *    for SOME level camera pitch in PRESENCE_PITCH_MIN…MAX. The user’s true pitch is always
+ *    such a witness, so no real user is rejected for the camera’s angle (camera-only gravity
+ *    from a 60° camera is 60° off: a fixed gravity test with it would drop a user leaning
+ *    toward the camera). A body lying flat ACROSS the view has its neck along the camera’s
+ *    horizontal x axis, which is horizontal for every pitch. One lying diagonally needs a pitch
+ *    that makes it both reclined and rolled, which the roll budget refuses. A flat body lying
+ *    ALONG the line of sight is a rigid rotation about camera x away from a reclined user under
+ *    another pitch: no pitch-free test can tell them apart. With a measured gravity (`known`,
+ *    ExtractOptions.gravityKnown) neck and trunk must also be within PRESENCE_NECK_MAX of it,
+ *    which rejects a flat body in any orientation.
+ */
+function presenceReject(c: Ctx, known: Vec3 | null, baselinePpm?: number): FrameReject | null {
+  if (c.ppm === null || !(c.ppm > 0)) return 'not-in-view'
+  if (!(c.f / c.ppm <= presenceMaxDepth(c.f, baselinePpm))) return 'too-far'
+  const earW = pairWorld(c, LM.leftEar, LM.rightEar)
+  const Nu = earW ? unit(sub(earW, shoulderMid(c, W))) : null
+  if (!Nu) return 'not-upright'
+  const cosNeck = Math.cos(PRESENCE_NECK_MAX * RAD)
+  if (known && dot(Nu, known) < cosNeck) return 'not-upright'
+
+  // the trunk (a hip seen): three times longer than the neck, so its direction is far less
+  // noisy — a flat body's trunk is as horizontal as its neck
+  const hipSeen = seenOf(c, LM.leftHip) || seenOf(c, LM.rightHip)
+  const T = hipSeen ? pairVector(c, LM.leftHip, LM.rightHip, LM.leftShoulder, LM.rightShoulder) : null
+  const Tu = T && norm(T) >= PRESENCE_TRUNK_MIN_M ? unit(T) : null
+  if (known && Tu && dot(Tu, known) < cosNeck) return 'not-upright'
+  // the shoulder line (both shoulders reliably in the frame)
+  const Su = bothInFrame(c, LM.leftShoulder, LM.rightShoulder)
+    ? unit(sub(W(c, LM.leftShoulder), W(c, LM.rightShoulder)))
+    : null
+  // the roll budget's body axis — the trunk (less noisy), else the neck — in the body's sagittal
+  // plane (its sideways part is the lean the shoulder line already shows)
+  const Ap = Su ? unit(reject(Tu ?? Nu, Su)) : null
+  for (let p = PRESENCE_PITCH_MIN; p <= PRESENCE_PITCH_MAX; p += 1) {
+    const U = cameraUp(p)
+    if (dot(Nu, U) < cosNeck) continue
+    if (Tu && dot(Tu, U) < cosNeck) continue
+    if (Su) {
+      const rollDeg = Math.asin(clamp(Math.abs(dot(Su, U)), 0, 1)) * DEG
+      const Up = unit(reject(U, Su))
+      const reclineDeg = Ap && Up ? Math.acos(clamp(dot(Ap, Up), -1, 1)) * DEG : 0
+      if (rollDeg > rollMaxAt(reclineDeg)) continue
+    }
+    return null
+  }
+  return 'not-upright'
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,8 +1172,23 @@ const bothInFrame = (c: Ctx, l: number, r: number): boolean => trustOf(c, l) >= 
  * UpEstimator's current estimate.
  */
 export function extractFeatures(frame: Frame, opts: ExtractOptions = {}): PostureFeatures | null {
+  return extractFeaturesChecked(frame, opts).features
+}
+
+/** extractFeatures plus why a BAD frame is BAD (`reject`, null for a GOOD frame; see FrameReject). */
+export function extractFeaturesChecked(
+  frame: Frame,
+  opts: ExtractOptions = {}
+): { features: PostureFeatures | null; reject: FrameReject | null } {
   const c = toCtx(frame, opts.hfovDeg, opts.hips ?? true)
-  if (!c || !goodCtx(c)) return null
+  if (!c) return { features: null, reject: 'no-pose' }
+  const reject = rejectCtx(c, knownUp(opts), opts.baselinePpm)
+  if (reject) return { features: null, reject }
+  const features = featuresOf(c, opts)
+  return { features, reject: features ? null : 'not-in-view' }
+}
+
+function featuresOf(c: Ctx, opts: ExtractOptions): PostureFeatures | null {
 
   // ---- gravity
   let U: Vec3

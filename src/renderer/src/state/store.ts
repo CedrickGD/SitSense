@@ -81,7 +81,21 @@ export interface SetupReviewResult {
   summary: string
   /** ≤ 3 imperative tips; the first one is also the session's coaching instruction on 'adjust' */
   instructions: string[]
+  /**
+   * the capture's essentials the on-device judge could not verify and the reviewer judged
+   * ([] = it confirmed a capture verified on-device); absent on older results
+   */
+  covered?: CheckId[]
 }
+
+/**
+ * Why the live assessment's essentials can't be verified (detection/setup-ui.ts viewFixOf):
+ * camera fixes — 'hips' hidden or outside the picture · 'angle' the trunk lean can't be judged
+ * from this direction · 'level' the camera looks tilted (rolled); posture fixes — 'lean' two
+ * readings disagree as when leaning in ("sit back and look ahead") · 'head' the head is a
+ * little past the limit, inside the margin for an imprecise gravity reference.
+ */
+export type SetupViewFix = 'hips' | 'angle' | 'level' | 'lean' | 'head'
 
 export interface SetupUiState {
   phase: SetupUiPhase
@@ -95,8 +109,10 @@ export interface SetupUiState {
   instruction: string | null
   /** checklist rows; empty while 'idle' */
   checks: SetupCheckUi[]
-  /** camera view of the latest GOOD frame; null while not in view */
+  /** camera view (smoothed over ~2 s with hysteresis); null while not in view */
   view: ViewKind | null
+  /** why an essential can't be verified right now (null: nothing unverified; absent = not known) */
+  viewFix?: SetupViewFix | null
   /** 0..1 while holding (1.5 s ring), 1 afterwards */
   holdProgress: number
   /** 0..1 while capturing (3 s ring), 1 afterwards */
@@ -141,6 +157,7 @@ export const IDLE_SETUP: SetupUiState = {
   instruction: null,
   checks: [],
   view: null,
+  viewFix: null,
   holdProgress: 0,
   captureProgress: 0,
   canForce: false,

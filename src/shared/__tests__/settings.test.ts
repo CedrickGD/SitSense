@@ -3,20 +3,36 @@ import { DEFAULT_SETTINGS, mergeSettings } from '../settings'
 
 describe('overlay settings', () => {
   it('defaults to the posture-colored alignment lines', () => {
-    expect(mergeSettings({}).overlay).toEqual({ style: 'skeleton', color: 'posture', customColor: '#44d7f0', meshIntensity: 0.4 })
+    expect(mergeSettings({}).overlay).toEqual({
+      style: 'skeleton',
+      color: 'posture',
+      customColor: '#44d7f0',
+      meshIntensity: 0.4,
+      meshBackdrop: 'camera'
+    })
   })
 
   it('moves v1 files off the old mesh default once, keeping their color', () => {
     const v1 = mergeSettings({ overlay: { style: 'mesh', color: 'cyan', customColor: '#44d7f0' } })
-    expect(v1.overlay).toEqual({ style: 'skeleton', color: 'cyan', customColor: '#44d7f0', meshIntensity: 0.4 })
+    expect(v1.overlay).toEqual({ style: 'skeleton', color: 'cyan', customColor: '#44d7f0', meshIntensity: 0.4, meshBackdrop: 'camera' })
     const v2 = mergeSettings({ settingsVersion: 2, overlay: { style: 'mesh', color: 'cyan', customColor: '#44d7f0' } })
     expect(v2.overlay.style).toBe('mesh')
   })
 
   it('keeps valid choices', () => {
-    const s = mergeSettings({ overlay: { style: 'hologram', color: 'violet', customColor: '#12ab9F' } })
-    expect(s.overlay).toEqual({ style: 'hologram', color: 'violet', customColor: '#12ab9F', meshIntensity: 0.4 })
+    const s = mergeSettings({ settingsVersion: 2, overlay: { style: 'mesh', meshBackdrop: 'dim', color: 'violet', customColor: '#12ab9F' } })
+    expect(s.overlay).toEqual({ style: 'mesh', color: 'violet', customColor: '#12ab9F', meshIntensity: 0.4, meshBackdrop: 'dim' })
     expect(mergeSettings({ overlay: { color: 'custom' } }).overlay.color).toBe('custom')
+  })
+
+  it('migrates the legacy hologram style to Mesh with the dim backdrop', () => {
+    const s = mergeSettings({ settingsVersion: 2, overlay: { style: 'hologram', color: 'violet' } })
+    expect(s.overlay.style).toBe('mesh')
+    expect(s.overlay.meshBackdrop).toBe('dim')
+    // the dim choice survives a trip through another style
+    const lines = mergeSettings({ ...s, overlay: { ...s.overlay, style: 'skeleton' } })
+    expect(lines.overlay.meshBackdrop).toBe('dim')
+    expect(mergeSettings({ overlay: { meshBackdrop: 'glow' } }).overlay.meshBackdrop).toBe('camera')
   })
 
   it('falls back field by field on stale or garbage values', () => {
@@ -167,5 +183,53 @@ describe('update checks', () => {
 
   it('drops unknown keys in the group', () => {
     expect(mergeSettings({ updates: { autoCheck: false, channel: 'beta', url: 'https://evil.example' } }).updates).toEqual({ autoCheck: false })
+  })
+})
+
+describe('boolean and scalar fields from hand-edited or older files', () => {
+  it('a "false" string never turns launch-at-login on (regression)', () => {
+    expect(mergeSettings({ general: { launchOnStartup: 'false' } }).general.launchOnStartup).toBe(false)
+    expect(mergeSettings({ general: { launchOnStartup: true, startHidden: 'yes', hidePreview: 1 } }).general).toEqual({
+      launchOnStartup: true,
+      startHidden: false,
+      hidePreview: false
+    })
+  })
+
+  it('notification switches fall back to the defaults', () => {
+    const n = mergeSettings({ notifications: { enabled: 'false', sound: 1, escalation: null } }).notifications
+    expect(n.enabled).toBe(true)
+    expect(n.sound).toBe(false)
+    expect(n.escalation).toBe(true)
+    expect(mergeSettings({ notifications: { enabled: false } }).notifications.enabled).toBe(false)
+  })
+
+  it('issue switches and per-stage toggles must be real booleans', () => {
+    const sink = mergeSettings({ issues: { sink: { enabled: 'no', notifyStages: ['false', 0, true] } } }).issues.sink
+    expect(sink.enabled).toBe(true)
+    expect(sink.notifyStages).toEqual([true, true, true])
+    const lean = mergeSettings({ issues: { lean: { enabled: false, notifyStages: [false, true, false] } } }).issues.lean
+    expect(lean.enabled).toBe(false)
+    expect(lean.notifyStages).toEqual([false, true, false])
+  })
+
+  it('never spreads a string or array group into the saved settings', () => {
+    const s = mergeSettings({ general: 'ab', notifications: [1, 2], overlay: 'x', issues: 'zz' })
+    expect(Object.keys(s.general).sort()).toEqual(['hidePreview', 'launchOnStartup', 'startHidden'])
+    expect(s.notifications).toEqual(DEFAULT_SETTINGS.notifications)
+    expect(s.overlay).toEqual(DEFAULT_SETTINGS.overlay)
+    expect(s.issues).toEqual(DEFAULT_SETTINGS.issues)
+  })
+
+  it('cameraDeviceId must be a non-empty string', () => {
+    expect(mergeSettings({ cameraDeviceId: 5 }).cameraDeviceId).toBeNull()
+    expect(mergeSettings({ cameraDeviceId: '' }).cameraDeviceId).toBeNull()
+    expect(mergeSettings({ cameraDeviceId: 'abc' }).cameraDeviceId).toBe('abc')
+  })
+
+  it('performancePreset rejects inherited keys like toString', () => {
+    expect(mergeSettings({ performancePreset: 'toString' }).performancePreset).toBe('balanced')
+    expect(mergeSettings({ performancePreset: '__proto__' }).performancePreset).toBe('balanced')
+    expect(mergeSettings({ performancePreset: 'efficient' }).performancePreset).toBe('efficient')
   })
 })

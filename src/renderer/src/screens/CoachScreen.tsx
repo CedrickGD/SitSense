@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useRef, useState, type JSX } from 'react'
 import { useAppStore } from '@renderer/state/store'
 import { TopBarContent } from '@renderer/components/AppShell'
-import { usableConnections } from '@renderer/components/CameraFeed'
+import { usableConnections } from '@renderer/ai/helpers'
 import { presetForConnection } from '@renderer/components/ai-settings'
 import { Icon } from '@renderer/components/icons'
 import { Button, Card, ConfirmButton, EmptyState, LinkButton, Skeleton, Tooltip } from '@renderer/components/primitives'
@@ -111,7 +111,8 @@ export default function CoachScreen(): JSX.Element {
     if (coachIntent.kind === 'ask') {
       if (ready && !pending && !offline) send(coachIntent.text)
       else setDraft(coachIntent.text)
-    } else if (ready && !pending) {
+    } else if (coachIntent.kind === 'check' && ready && !pending) {
+      // only an explicit check sends pose data — never an unknown (newer) intent kind
       checkPosture()
     }
   }, [coachIntent, settings, ready, pending, offline, send, setDraft, checkPosture, consumeCoachIntent])

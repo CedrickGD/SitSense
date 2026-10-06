@@ -4,6 +4,7 @@ import type { CalibrationBaseline } from '@shared/posture'
 import {
   aiStatus,
   connectionProblem,
+  connectionUsable,
   baseUrlAlwaysVisible,
   draftDiffers,
   draftForConnection,
@@ -25,6 +26,7 @@ import {
   switchPreset,
   testStatus
 } from '../ai-settings'
+import { isUsableConnection } from '@renderer/ai/helpers'
 
 const conn = (over: Partial<AiConnection>): AiConnection => ({
   id: 'a',
@@ -228,8 +230,16 @@ describe('disclosure', () => {
     const sketch = shareDisclosure('sketch', 'Google Gemini')
     expect(sketch).toContain('Google Gemini')
     expect(sketch).toMatch(/no camera image/)
-    expect(sketch).toMatch(/ask the coach/)
+    expect(sketch).toMatch(/message the coach/)
+    expect(sketch).toMatch(/never an image/)
     expect(sketch).toMatch(/Check my posture/)
+    // the coach still answers while paused; only camera data is held back
+    expect(sketch).not.toMatch(/nothing is sent while monitoring is paused/)
+    expect(sketch).toMatch(/paused[^.]*nothing from the camera/)
+    expect(sketch).toMatch(/coach questions are still answered/)
+    // a coach message never carries the camera still, even in snapshot mode
+    expect(shareDisclosure('snapshot', 'OpenAI')).toMatch(/one small still from your camera[^.]*, plus the angles it measured, to OpenAI\./)
+    expect(shareDisclosure('snapshot', 'OpenAI')).toMatch(/When you message the coach[^.]*never an image/)
     expect(sketch).not.toMatch(/can’t answer/)
     expect(shareDisclosure('snapshot', null)).toMatch(/640 px.*your connected provider/)
     const chain = shareDisclosure('snapshot', ['Google Gemini', 'OpenRouter', 'Ollama on this computer'])
@@ -253,6 +263,24 @@ describe('setupLine', () => {
     expect(forced.verdict).toBe('Not verified')
     expect(setupLine(base, new Date(2026, 9, 5, 9, 0).getTime()).ago).toBe('Set up 3 days ago')
     expect(setupLine(base, new Date(2026, 9, 9, 9, 0).getTime()).when).toBe('2 Oct 2026, 14:20')
+  })
+})
+
+describe('connectionUsable agrees with the shared predicate', () => {
+  it('matches isUsableConnection and connectionProblem for every case', () => {
+    const cases: AiConnection[] = [
+      conn({}),
+      conn({ enabled: false }),
+      conn({ hasKey: false }),
+      conn({ model: ' ' }),
+      conn({ kind: 'openai-compatible', baseUrl: null, hasKey: false }),
+      conn({ kind: 'openai-compatible', baseUrl: 'http://localhost:11434/v1', hasKey: false }),
+      conn({ kind: 'anthropic', hasKey: false })
+    ]
+    for (const c of cases) {
+      expect(connectionUsable(c)).toBe(isUsableConnection(c))
+      expect(connectionUsable(c)).toBe(c.enabled && connectionProblem(c) === null)
+    }
   })
 })
 

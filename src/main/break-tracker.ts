@@ -3,21 +3,24 @@
 //
 // Rules:
 // - "sitting" = a fresh posture snapshot says the user is at the desk (presence
-//   'active'), monitoring not paused. Calibration doesn't matter.
+//   'active'), monitoring not paused and posture setup saved (main/breaks.ts decides).
 // - Anything else (away, paused, no fresh snapshot) is "absent". Absences shorter
 //   than BREAK_MIN_MS don't interrupt the stretch (reaching for a coffee isn't a break);
 //   once an absence reaches BREAK_MIN_MS the stretch ends.
 // - A gap of BREAK_MIN_MS or more between ticks (system sleep) also ends the stretch.
-// - A break counts toward "breaks taken" when the stretch it ends lasted at least
-//   MIN_COUNTED_STRETCH_MS — so every break that follows a reminder counts.
+// - Every stretch that ends counts as a break ("walking away for 3 minutes counts as a
+//   break"), however short the sitting before it was — frequent short breaks are the goal.
+//   The only guard is MIN_COUNTED_STRETCH_MS of sitting, so a stray "sitting" blip
+//   (someone walking past the camera) followed by an empty chair is not a break.
 // - The reminder fires while sitting once the stretch reaches the interval, then
 //   repeats every REPEAT_MS if ignored; snoozing pushes it out.
 
-import type { SittingState } from '../shared/ipc'
+import { BREAK_AWAY_MINUTES, type SittingState } from '../shared/ipc'
 import type { BreakSettings } from '../shared/settings'
 
-export const BREAK_MIN_MS = 3 * 60_000
-export const MIN_COUNTED_STRETCH_MS = 20 * 60_000
+export const BREAK_MIN_MS = BREAK_AWAY_MINUTES * 60_000
+/** sitting needed before leaving counts as a break: filters a passer-by, not short stretches */
+export const MIN_COUNTED_STRETCH_MS = BREAK_MIN_MS
 export const REPEAT_MS = 15 * 60_000
 export const SNOOZE_DEFAULT_MIN = 10
 export const SNOOZE_MAX_MIN = 120

@@ -6,7 +6,8 @@
 // exposes). Every output is display-ready: no NaN, no negative durations, "—" for nothing.
 
 import { ISSUES, type IssueId, type StatMinute } from '@shared/posture'
-import { emptyDay, localDateKey, type DaySummary, type HourBucket, type StageMinutes } from '@shared/stats'
+import { BREAK_AWAY_MINUTES } from '@shared/ipc'
+import { STREAK_MIN_ALIGNED_SHARE, emptyDay, localDateKey, type DaySummary, type HourBucket, type StageMinutes } from '@shared/stats'
 import { DASH, MINUS, fmtClock, fmtCount, fmtMinutes, parseDateKey, plural } from '@renderer/lib/format'
 import { scoreBand, type ScoreBand } from '@renderer/lib/score'
 
@@ -14,8 +15,8 @@ import { scoreBand, type ScoreBand } from '@renderer/lib/score'
 export const MIN_ACTIVE_FOR_PCT = 5
 /** Best/worst hour needs this many active minutes in the hour (§5.1). */
 export const MIN_ACTIVE_FOR_HOUR_RANK = 15
-/** Default break length L in minutes (breaks.lengthMinutes, §5.3). */
-export const DEFAULT_BREAK_MINUTES = 3
+/** Break length L in minutes (shared BREAK_AWAY_MINUTES, the tracker's own value; §5.3). */
+export const DEFAULT_BREAK_MINUTES = BREAK_AWAY_MINUTES
 
 export type StatState = StatMinute['s']
 export type StageNo = 1 | 2 | 3
@@ -402,15 +403,20 @@ export function dayKpis({ day, previous, stretches, everyMinutes, isToday }: Day
         muted
       }
 
-  const nudges: Kpi = muted
-    ? { value: DASH, sub: '', tone: 'dim', muted }
-    : {
-        value: fmtCount(day.alertsCount),
-        sub: day.alertsCount > 0 ? perHour(day.alertsCount, day.trackedMinutes) : 'none needed',
-        tone: day.alertsCount > 0 ? 'dim' : 'good',
-        muted
-      }
+  const nudges = nudgesKpi(day.alertsCount, day.trackedMinutes, pct, muted)
   return { aligned, sitting, breaks, nudges }
+}
+
+/**
+ * The Nudges tile. The count only covers toasts that were actually shown, so zero can also
+ * mean "notifications off / filtered out". "None needed" is therefore judged from the posture
+ * itself (the streak's good-day bar), never from the count alone.
+ */
+function nudgesKpi(count: number, trackedMinutes: number, pct: number | null, muted: boolean): Kpi {
+  if (muted) return { value: DASH, sub: '', tone: 'dim', muted }
+  if (count > 0) return { value: fmtCount(count), sub: perHour(count, trackedMinutes), tone: 'dim', muted }
+  const calm = pct !== null && pct >= STREAK_MIN_ALIGNED_SHARE * 100
+  return { value: fmtCount(count), sub: calm ? 'none needed' : 'none', tone: calm ? 'good' : 'faint', muted }
 }
 
 /** The Week-view tiles: week totals; Aligned vs the previous week. */
@@ -439,14 +445,7 @@ export function weekKpis(week: readonly DaySummary[], previousWeek: readonly Day
           tone: sum.breaksTaken > 0 ? 'dim' : 'faint',
           muted
         },
-    nudges: muted
-      ? { value: DASH, sub: '', tone: 'dim', muted }
-      : {
-          value: fmtCount(sum.alertsCount),
-          sub: sum.alertsCount > 0 ? perHour(sum.alertsCount, sum.trackedMinutes) : 'none needed',
-          tone: sum.alertsCount > 0 ? 'dim' : 'good',
-          muted
-        }
+    nudges: nudgesKpi(sum.alertsCount, sum.trackedMinutes, pct, muted)
   }
 }
 

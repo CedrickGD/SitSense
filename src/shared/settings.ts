@@ -31,6 +31,8 @@ export interface NotificationSettings {
 /**
  * How the live preview draws what the pose model sees. 'skeleton' is the
  * "Lines" view: the ear–shoulder–hip alignment the AI measures (the default).
+ * 'hologram' is legacy (Mesh with a dimmed camera): mergeSettings migrates it to
+ * 'mesh' + meshBackdrop 'dim', so switching styles can never lose the dim choice.
  */
 export type OverlayStyle = 'skeleton' | 'mesh' | 'hologram' | 'off'
 
@@ -60,6 +62,8 @@ export interface OverlaySettings {
   customColor: string
   /** mesh/hologram fill strength 0.15–1 (lower = more of the person shows through) */
   meshIntensity: number
+  /** what shows behind the Mesh style: the plain camera image, or a dimmed one ("Dim camera behind mesh") */
+  meshBackdrop: 'camera' | 'dim'
 }
 
 export const MESH_INTENSITY_RANGE = { min: 0.15, max: 1, default: 0.4 } as const
@@ -142,7 +146,8 @@ export const DEFAULT_SETTINGS: Settings = {
     style: 'skeleton',
     color: 'posture',
     customColor: '#44d7f0',
-    meshIntensity: MESH_INTENSITY_RANGE.default
+    meshIntensity: MESH_INTENSITY_RANGE.default,
+    meshBackdrop: 'camera'
   },
   breaks: {
     enabled: true,
@@ -165,19 +170,27 @@ function clampNum(v: unknown, r: { min: number; max: number; default: number }):
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
 
+/** a real boolean, else the default — "false" (a string) is truthy and must never pass */
+const bool = (v: unknown, d: boolean): boolean => (typeof v === 'boolean' ? v : d)
+/** only plain objects are spread: a string or array would spread "0","1",… keys into the saved file */
+const obj = (v: unknown): Record<string, unknown> => (isPlainObject(v) ? v : {})
+
 /** Deep-merge a possibly stale/partial persisted object over the defaults. */
 export function mergeSettings(persisted: unknown): Settings {
   const p = (persisted ?? {}) as Partial<Settings>
   const base = structuredClone(DEFAULT_SETTINGS)
   if (typeof p !== 'object') return base
+  const pn = obj(p.notifications)
+  const pg = obj(p.general)
+  const pIssues = obj(p.issues)
   const out: Settings = {
     ...base,
     ...p,
     issues: { ...base.issues },
-    notifications: { ...base.notifications, ...(p.notifications ?? {}) },
-    general: { ...base.general, ...(p.general ?? {}) },
-    overlay: { ...base.overlay, ...(p.overlay ?? {}) },
-    breaks: { ...base.breaks, ...(p.breaks && typeof p.breaks === 'object' && !Array.isArray(p.breaks) ? p.breaks : {}) },
+    notifications: { ...base.notifications, ...pn },
+    general: { ...base.general, ...pg },
+    overlay: { ...base.overlay, ...obj(p.overlay) },
+    breaks: { ...base.breaks, ...obj(p.breaks) },
     updates: {
       autoCheck: isPlainObject(p.updates) && typeof p.updates['autoCheck'] === 'boolean' ? p.updates['autoCheck'] : base.updates.autoCheck
     },
@@ -192,17 +205,34 @@ export function mergeSettings(persisted: unknown): Settings {
   // calmer alignment-lines view. Files from v1 still carry the old default.
   if (fromVersion < 2 && out.overlay.style === 'mesh') out.overlay.style = 'skeleton'
   for (const id of Object.keys(base.issues) as IssueId[]) {
-    out.issues[id] = { ...base.issues[id], ...(p.issues?.[id] ?? {}) }
-    const ns = out.issues[id].notifyStages
-    if (!Array.isArray(ns) || ns.length !== 3) out.issues[id].notifyStages = [true, true, true]
+    const pi = obj(pIssues[id])
+    out.issues[id] = { ...base.issues[id], ...pi }
+    out.issues[id].enabled = bool(pi['enabled'], base.issues[id].enabled)
+    const ns = pi['notifyStages']
+    out.issues[id].notifyStages =
+      Array.isArray(ns) && ns.length === 3 ? [bool(ns[0], true), bool(ns[1], true), bool(ns[2], true)] : [true, true, true]
     out.issues[id].sensitivity = Math.min(2, Math.max(0.5, Number(out.issues[id].sensitivity) || 1))
   }
+  // boolean switches: a hand-edited or buggy "false" string is truthy (would register
+  // launch-at-login, keep nudging) while the UI toggles render the opposite state
+  out.notifications.enabled = bool(pn['enabled'], base.notifications.enabled)
+  out.notifications.escalation = bool(pn['escalation'], base.notifications.escalation)
+  out.notifications.sound = bool(pn['sound'], base.notifications.sound)
+  for (const k of ['launchOnStartup', 'startHidden', 'hidePreview'] as const) out.general[k] = bool(pg[k], base.general[k])
   out.notifications.dwellSeconds = Math.min(30, Math.max(5, Number(out.notifications.dwellSeconds) || 12))
   out.notifications.cooldownMinutes = Math.min(10, Math.max(1, Number(out.notifications.cooldownMinutes) || 3))
+  if (typeof out.cameraDeviceId !== 'string' || out.cameraDeviceId === '') out.cameraDeviceId = null
   // enum fields from stale files must fall back, not poison frame pacing etc.
-  if (!(out.performancePreset in PRESET_FPS)) out.performancePreset = 'balanced'
+  // (hasOwn, not `in`: `in` also matches inherited keys like 'toString')
+  if (typeof out.performancePreset !== 'string' || !Object.hasOwn(PRESET_FPS, out.performancePreset)) out.performancePreset = 'balanced'
   if (!['auto', 'GPU', 'CPU'].includes(out.delegate)) out.delegate = 'auto'
   if (out.resolvedDelegate !== 'GPU' && out.resolvedDelegate !== 'CPU') out.resolvedDelegate = null
+  if (out.overlay.meshBackdrop !== 'camera' && out.overlay.meshBackdrop !== 'dim') out.overlay.meshBackdrop = base.overlay.meshBackdrop
+  // legacy 'hologram' = Mesh over a dimmed camera: the dim choice is its own field now
+  if (out.overlay.style === 'hologram') {
+    out.overlay.style = 'mesh'
+    out.overlay.meshBackdrop = 'dim'
+  }
   if (!OVERLAY_STYLES.includes(out.overlay.style)) out.overlay.style = base.overlay.style
   if (out.overlay.color !== 'posture' && out.overlay.color !== 'custom' && !Object.hasOwn(OVERLAY_PRESETS, out.overlay.color)) {
     out.overlay.color = base.overlay.color

@@ -1,7 +1,7 @@
 // Pure chat helpers for the Coach (docs/specs/ui-v3.md §4): what is sent to the model,
 // suggested prompts, message grouping, and the local history format.
 
-import { AI_CHAT_LIMITS, type AiChatMessage } from '@shared/ai'
+import { AI_CHAT_LIMITS, type AiChatMessage, type AiChatReply } from '@shared/ai'
 import type { ContextPreview } from './context'
 import type { CoachContextToggles, CoachMessage } from './types'
 
@@ -227,4 +227,27 @@ let idSeq = 0
 export function newMessageId(now = Date.now()): string {
   idSeq = (idSeq + 1) % 1_000_000
   return `${now.toString(36)}-${idSeq.toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
+}
+
+// ───────────────────────────── replies ─────────────────────────────
+
+/** What an aiChat reply becomes in the conversation (the store adds id/at). */
+export type ReplyRow =
+  | { kind: 'text'; text: string; meta: { label: string; model: string; fallbackFrom: string | null } }
+  | { kind: 'error'; text: string; fromModel: boolean }
+
+/**
+ * Map main's reply to a row. Main ran the connection queue, so it decides whether a
+ * fallback answered (`fallbackFrom`) and whether a failure came from the providers
+ * (`fromModel`, which adds "check Settings → AI models"); validation, AI off, paused and
+ * interrupted replies are not the model's fault. Both are optional on AiChatReply and
+ * read defensively (a main on an older shape leaves them out).
+ */
+export function replyRow(res: AiChatReply): ReplyRow {
+  if (res.ok) {
+    const f: unknown = res.fallbackFrom
+    const fallbackFrom = typeof f === 'string' && f ? f.slice(0, 80) : null
+    return { kind: 'text', text: res.reply, meta: { label: res.connectionLabel, model: res.model, fallbackFrom } }
+  }
+  return { kind: 'error', text: res.message, fromModel: res.fromModel === true }
 }

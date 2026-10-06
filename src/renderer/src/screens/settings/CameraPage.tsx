@@ -15,7 +15,8 @@ import { SegmentedControl, Select, Toggle, Tooltip } from '@renderer/components/
 import { detectionController } from '@renderer/detection/controller'
 import { STAGE_COLOR } from '@renderer/lib/ui'
 import { useAppStore } from '@renderer/state/store'
-import { meshPercent, previewStyleOf, storedStyleFor, STYLE_COPY, type PreviewStyle } from './meta'
+import { meshDimsBackdrop } from '@renderer/overlay/meshLook'
+import { meshPercent, previewStyleOf, STYLE_COPY, type PreviewStyle } from './meta'
 import { GroupDivider, Saved, SettingRow, SettingsCard, SettingsGrid, SliderRow, useCommit } from './parts'
 
 export default function CameraPage({ settings }: { settings: Settings }): JSX.Element {
@@ -154,7 +155,7 @@ function PreviewCard({ settings }: { settings: Settings }): JSX.Element {
             describedBy={styleDescId}
             fullWidth
             value={picked}
-            onChange={(v) => commit('style', { overlay: { style: storedStyleFor(v, style) } })}
+            onChange={(v) => commit('style', { overlay: { style: v } })}
             options={STYLE_OPTIONS}
           />
           <p id={styleDescId} className="min-h-4 type-caption text-text-dim">
@@ -190,8 +191,8 @@ function PreviewCard({ settings }: { settings: Settings }): JSX.Element {
                   label="Dim camera behind mesh"
                   describedBy={dimId}
                   disabled={meshUnavailable}
-                  checked={style === 'hologram'}
-                  onChange={(v) => commit('dim', { overlay: { style: v ? 'hologram' : 'mesh' } })}
+                  checked={meshDimsBackdrop(settings.overlay)}
+                  onChange={(v) => commit('dim', { overlay: { style: 'mesh', meshBackdrop: v ? 'dim' : 'camera' } })}
                 />
               }
             />

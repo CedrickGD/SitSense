@@ -51,6 +51,33 @@ function subscribeUpdates(): void {
   api.onUpdateState?.(apply)
 }
 
+/**
+ * The window's close button hides SitSense to the tray: that means "put it away", so an
+ * open posture setup is left (SetupFlow's unmount cancels the session) and nudges resume.
+ * A minimize keeps setup open.
+ */
+function subscribeClosedToTray(): void {
+  window.sitsense.onWindowClosedToTray?.(() => useAppStore.getState().closeSetup())
+}
+
+/**
+ * Ctrl+W hides to the tray and Ctrl+M minimizes, everywhere (setup included). The packaged
+ * build has no application menu (main/window.ts), so the menu's own accelerators are gone.
+ */
+function useWindowShortcuts(): void {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!e.ctrlKey || e.altKey || e.metaKey || e.shiftKey || e.defaultPrevented || e.repeat) return
+      const k = e.key.toLowerCase()
+      if (k !== 'w' && k !== 'm') return
+      e.preventDefault()
+      void window.sitsense.windowControl(k === 'w' ? 'hide' : 'minimize').catch(() => undefined)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+}
+
 /** App boot (§8.5): a centered breathing glyph + "Starting SitSense…". */
 function BootScreen(): JSX.Element {
   return (
@@ -79,6 +106,7 @@ export default function App(): JSX.Element {
   const settingsLoaded = useAppStore((s) => s.settings !== null)
   const setupOpen = useAppStore((s) => s.setupFlow.open)
   const booted = useRef(false)
+  useWindowShortcuts()
 
   useEffect(() => {
     if (booted.current) return
@@ -86,6 +114,7 @@ export default function App(): JSX.Element {
     if (useAppStore.getState().settings === null) routeFirstRun()
     subscribeSitting()
     subscribeUpdates()
+    subscribeClosedToTray()
     detectionController.init().catch((err) => console.error('[app] startup failed:', err))
   }, [])
 

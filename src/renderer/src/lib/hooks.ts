@@ -108,13 +108,20 @@ export function useMonitoring(): MonitoringState {
   }
 }
 
-/** What the sidebar's monitoring pill says (§2.3): priority paused > camera > not set up > monitoring. */
-export type MonitoringPillState = 'monitoring' | 'paused' | 'camera' | 'setup'
+/**
+ * What the sidebar's monitoring pill says (§2.3): priority paused > camera (or the pose
+ * model failed to load) > not set up > set up for another camera (nothing judged, no
+ * nudges) > monitoring.
+ */
+export type MonitoringPillState = 'monitoring' | 'paused' | 'camera' | 'setup' | 'mismatch'
 
-export function monitoringPillState(m: Pick<MonitoringState, 'paused' | 'cameraError' | 'calibrated'>): MonitoringPillState {
+export function monitoringPillState(
+  m: Pick<MonitoringState, 'paused' | 'cameraError' | 'calibrated'> & Partial<Pick<MonitoringState, 'detectorError' | 'mismatch'>>
+): MonitoringPillState {
   if (m.paused) return 'paused'
-  if (m.cameraError) return 'camera'
+  if (m.cameraError || m.detectorError === 'model') return 'camera'
   if (!m.calibrated) return 'setup'
+  if (m.mismatch) return 'mismatch'
   return 'monitoring'
 }
 

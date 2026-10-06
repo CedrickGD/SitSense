@@ -74,7 +74,9 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     handleAppProtocol()
     const settings = loadSettings()
-    applyAutostart(settings)
+    // a defaults fallback (unreadable/corrupt file) is not the user's choice: it must
+    // never delete their launch-at-login entry
+    applyAutostart(settings, { trusted: getSettingsLoadIssue() === null })
     registerIpc()
     initStats()
     initBreaks()

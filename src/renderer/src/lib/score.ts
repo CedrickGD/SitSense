@@ -69,6 +69,22 @@ export function rawScore(
   return clamp(100 - total, 0, 100)
 }
 
+/**
+ * True while the engine has suspended every detector because the view is far off the
+ * setup distance (`PostureSnapshot.suspended`, docs/specs/detection.md §Recalibration
+ * hint). Every issue then reads stage 0, so nothing may treat it as good posture. Read
+ * loosely: the field is optional and older snapshots don't carry it.
+ */
+export function isSuspended(snapshot: unknown): boolean {
+  return !!snapshot && typeof snapshot === 'object' && (snapshot as { suspended?: unknown }).suspended === true
+}
+
+/**
+ * The posture-mode overlay color while nothing is judged (detectors suspended): neutral,
+ * never the sage that means "good".
+ */
+export const NOT_JUDGED_COLOR = 'var(--color-slate-cool)'
+
 export interface ScoreGate {
   paused?: boolean
   cameraError?: unknown
@@ -80,14 +96,15 @@ export interface ScoreGate {
 
 /**
  * The score for a snapshot, or null when there is nothing honest to score: no snapshot,
- * not set up, away, paused, camera trouble, detection not running.
+ * not set up, away, paused, camera trouble, detection not running, or every detector
+ * suspended (view far off the setup distance: the stage-0 issues are not a judgment).
  */
 export function postureScore(
   snapshot: PostureSnapshot | null | undefined,
   enabled: Partial<Record<IssueId, boolean>> = {},
   gate: ScoreGate = {}
 ): number | null {
-  if (!snapshot || !snapshot.calibrated || snapshot.presence === 'away') return null
+  if (!snapshot || !snapshot.calibrated || snapshot.presence === 'away' || isSuspended(snapshot)) return null
   if (gate.paused || gate.cameraError || gate.running === false || gate.baselineMismatch) return null
   return rawScore(snapshot.issues, enabled)
 }

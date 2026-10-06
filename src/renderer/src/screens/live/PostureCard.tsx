@@ -24,6 +24,7 @@ const STATUS_SUB: Partial<Record<StatusKind, string>> = {
   setup: 'SitSense coaches you into a good posture first.',
   camera: "Posture isn't being watched right now.",
   mismatch: 'Your saved posture is for another camera.',
+  changed: "Posture isn't judged until you redo setup.",
   restarting: 'Back in a moment.'
 }
 
@@ -116,7 +117,7 @@ function GaugeZone({ showTracks }: { showTracks: boolean }): JSX.Element {
           name={
             g === 'paused'
               ? 'pause'
-              : g === 'setup' || g === 'mismatch'
+              : g === 'setup' || g === 'mismatch' || g === 'changed'
                 ? 'setup'
                 : g === 'camera'
                   ? 'camera'
@@ -128,7 +129,7 @@ function GaugeZone({ showTracks }: { showTracks: boolean }): JSX.Element {
           className="text-text-faint"
         />
         <p className="max-w-[30ch] type-body text-text-dim">{GAUGE_GATE_COPY[g]}</p>
-        {(g === 'setup' || g === 'mismatch') && (
+        {(g === 'setup' || g === 'mismatch' || g === 'changed') && (
           <Button variant="primary" size="sm" icon="setup" ringOn="card" onClick={() => openSetup()}>
             {g === 'setup' ? 'Set up posture' : 'Redo posture setup'}
           </Button>

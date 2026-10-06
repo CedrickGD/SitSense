@@ -13,7 +13,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { INSTRUCTIONS, assessPosture } from '../assess'
 import { SetupSession, buildBaseline } from '../calibration'
-import { STAGES, UNVERIFIED_FORCE_AFTER_S } from '../constants'
+import { STAGES, UNVERIFIED_FORCE_AFTER_S, UP_MAX_ROLL } from '../constants'
 import { PostureEngine, computeDeviations, extractOptionsFor } from '../engine'
 import { CAM_UP, extractFeatures, isGoodFrame } from '../features'
 import type { PoseFrame, PostureBaseline } from '../types'
@@ -24,6 +24,7 @@ import {
   NOSE_DROP_DEG,
   NO_NOISE,
   PoseSim,
+  ROLLED_GRID_ROLLS,
   eyesOnScreen,
   posture,
   skeleton,
@@ -199,6 +200,42 @@ describe('setup never accepts a bad posture, from any viewpoint', () => {
       const share = headOnTrunkTruth(bp.p) >= 55 ? 0.85 : headOnTrunkTruth(bp.p) >= 52 ? 0.5 : 0
       expect({ name: bp.name, unknown: told.unknown >= views.unknown * share }).toEqual({ name: bp.name, unknown: true })
     }
+  })
+})
+
+describe('setup never accepts a bad posture: gravity references that are a few degrees off', () => {
+  it('a camera rolled 5–8° (past the level-mount prior): practically never saved', () => {
+    // a clip-on webcam mounted a little crooked: the roll leaks into the sagittal angles of an
+    // angled or profile view, and the gravity estimate keeps the camera level
+    const ROLLED = viewpointGrid(ROLLED_GRID_ROLLS).filter((vp) => Math.abs(vp.roll) > UP_MAX_ROLL)
+    let runs = 0
+    const saved: string[] = []
+    BAD_SEATED.forEach((bp, k) => {
+      ROLLED.forEach((vp, i) => {
+        if (!inView(vp, bp.p)) return
+        runs++
+        if (hold(vp, bp.p, OFF + 900 + 41 * k + i, false).phases.has('done')) saved.push(`${bp.name} @ ${vp.name}`)
+      })
+    })
+    expect(runs).toBeGreaterThanOrEqual(200)
+    // without a horizontal cue, an 8° roll at an angled view can still leak ~9° into the trunk
+    // reading: rare, not impossible (docs/specs/detection.md, camera roll)
+    expect({ saved, rare: saved.length <= Math.max(1, Math.floor(runs * 0.01)) }).toEqual({ saved, rare: true })
+  })
+
+  it.each(
+    BAD_SEATED.filter((b) => b.family !== 'lying').flatMap((b, k) => [-10, 10].map((slope) => ({ ...b, slope, k: 2 * k + (slope > 0 ? 1 : 0) })))
+  )('$name on a seat with the knees $slope°: never saved', (bp) => {
+    // thigh gravity assumes level thighs: a 10° slope reads every absolute sagittal angle 10° off
+    const p = { ...bp.p, thighSlope: bp.slope }
+    let views = 0
+    IN_VIEW.forEach((vp, i) => {
+      if (!inView(vp, p)) return
+      views++
+      const local = hold(vp, p, OFF + 5000 + 41 * bp.k + i, false)
+      expect({ vp: vp.name, done: local.phases.has('done') }).toEqual({ vp: vp.name, done: false })
+    })
+    expect(views).toBeGreaterThanOrEqual(IN_VIEW.length * 0.5)
   })
 })
 

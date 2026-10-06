@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { UpdateState, UpdateStatus } from '@shared/update'
-import { updateCheckLine } from '../meta'
-import { UPDATE_PRIVACY_NOTE, shortVersion, updateCardView } from '../update-view'
+import { updateCheckLine, updateOnlyRequestLine } from '../meta'
+import { shortVersion, updateCardView, updatePrivacyNote } from '../update-view'
 
 const NOW = Date.UTC(2026, 9, 5, 12, 0, 0)
 const status = (state: UpdateState, extra: Partial<UpdateStatus> = {}): UpdateStatus => ({
@@ -71,10 +71,28 @@ describe('update card', () => {
   })
 
   it('copy', () => {
-    expect(UPDATE_PRIVACY_NOTE).toBe('Asks GitHub for the latest version — no posture data is sent.')
     expect(shortVersion('0.2.0')).toBe('v0.2.0')
     expect(shortVersion('')).toBe('')
-    expect(updateCheckLine(true)).toMatch(/every 6 hours/)
-    expect(updateCheckLine(false)).toMatch(/only when you press/)
+  })
+
+  // an installed copy downloads the new installer right after the check (updater.ts
+  // autoDownload = !portable): the copy must say so; unknown mode never claims "only asks"
+  it('privacy copy: installed (and not-yet-known) builds mention the background download, portable does not', () => {
+    for (const mode of ['installed', null] as const) {
+      expect(updatePrivacyNote(mode)).toMatch(/download/)
+      expect(updateCheckLine(true, mode)).toMatch(/every 6 hours/)
+      expect(updateCheckLine(true, mode)).toMatch(/downloads a newer version/)
+      expect(updateCheckLine(false, mode)).toMatch(/only when you press/)
+      expect(updateCheckLine(false, mode)).toMatch(/downloads right away/)
+      expect(updateOnlyRequestLine(mode)).toMatch(/downloads a newer one/)
+      expect(updateOnlyRequestLine(mode)).not.toMatch(/only request/)
+    }
+    expect(updatePrivacyNote('portable')).toBe('Asks GitHub for the latest version — no posture data is sent.')
+    expect(updatePrivacyNote('portable')).not.toMatch(/download/)
+    expect(updateCheckLine(true, 'portable')).toMatch(/every 6 hours/)
+    expect(updateCheckLine(true, 'portable')).not.toMatch(/download/)
+    expect(updateCheckLine(false, 'portable')).toMatch(/only when you press/)
+    expect(updateCheckLine(false, 'portable')).not.toMatch(/download/)
+    expect(updateOnlyRequestLine('portable')).toMatch(/only request SitSense makes/)
   })
 })

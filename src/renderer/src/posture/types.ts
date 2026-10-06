@@ -44,6 +44,19 @@ export interface PoseFrame {
 /** null = no pose detected this frame. */
 export type Frame = PoseFrame | null
 
+/**
+ * Why a frame is BAD (§2; null = GOOD):
+ * - 'no-pose': no pose, no world landmarks, or malformed input;
+ * - 'not-in-view': a pose, but not enough of it in the picture (head + one shoulder, an ear
+ *   and a shoulder inside the frame, a measurable scale);
+ * - 'too-far': the pose sits farther away than a user at the screen (a person behind the
+ *   user, a small picture reconstructed at human size);
+ * - 'not-upright': no level webcam could see this pose as someone sitting (head beside or
+ *   below the shoulders: a figure lying flat on the desk, a picture upside down).
+ * The last two are "not you": the UI should not say it sees the user.
+ */
+export type FrameReject = 'no-pose' | 'not-in-view' | 'too-far' | 'not-upright'
+
 /** What neckLat is measured against (see PostureFeatures.neckLatRef). */
 export type NeckLatRef = 'trunk' | 'gravity'
 

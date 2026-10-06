@@ -10,6 +10,7 @@ import {
   isAtDefaults,
   keysLine,
   meshPercent,
+  NAV_MODE_HYSTERESIS,
   notifyFrom,
   previewStyleOf,
   resetPatch,
@@ -18,7 +19,6 @@ import {
   SENSITIVITY_STEPS,
   sensitivityIndex,
   stagesFrom,
-  storedStyleFor,
   TOAST_PREVIEW
 } from '../meta'
 
@@ -43,6 +43,37 @@ describe('categories', () => {
     expect(categoryNavMode(730)).toBe('chips')
     expect(categoryNavMode(0)).toBe('chips')
   })
+  it('needs a margin wider than a scrollbar before widening the list again (no list ↔ chips loop)', () => {
+    // the reported loop: compact at ≥ 832, its taller page adds a 10 px scrollbar → 826 →
+    // chips, the shorter chip page drops the scrollbar → 836 → compact … every frame
+    expect(NAV_MODE_HYSTERESIS).toBeGreaterThan(10)
+    let mode = categoryNavMode(836)
+    expect(mode).toBe('compact')
+    for (let i = 0; i < 6; i++) {
+      mode = categoryNavMode(mode === 'chips' ? 836 : 826, mode)
+    }
+    expect(mode).toBe('chips')
+    // same at the full ↔ compact edge
+    mode = categoryNavMode(896)
+    expect(mode).toBe('full')
+    for (let i = 0; i < 6; i++) mode = categoryNavMode(mode === 'full' ? 886 : 896, mode)
+    expect(mode).toBe('compact')
+    // widening still happens once there is clearly room; narrowing never waits
+    expect(categoryNavMode(832 + NAV_MODE_HYSTERESIS, 'chips')).toBe('compact')
+    expect(categoryNavMode(832 + NAV_MODE_HYSTERESIS - 1, 'chips')).toBe('chips')
+    expect(categoryNavMode(892 + NAV_MODE_HYSTERESIS, 'compact')).toBe('full')
+    expect(categoryNavMode(892 + NAV_MODE_HYSTERESIS, 'chips')).toBe('full')
+    expect(categoryNavMode(891, 'full')).toBe('compact')
+    expect(categoryNavMode(831, 'compact')).toBe('chips')
+    expect(categoryNavMode(831, 'full')).toBe('chips')
+    // with prev, a side list still always leaves the cards 2 columns
+    for (const prev of ['full', 'compact', 'chips'] as const)
+      for (let w = 400; w < 1600; w++) {
+        const m = categoryNavMode(w, prev)
+        const list = m === 'full' ? 260 + 32 : m === 'compact' ? 200 + 32 : 0
+        if (m !== 'chips') expect(w - list).toBeGreaterThanOrEqual(600)
+      }
+  })
   it('never gives a wider space fewer grid columns than a narrower one', () => {
     const cols = (w: number): number => {
       const mode = categoryNavMode(w)
@@ -57,10 +88,6 @@ describe('overlay style', () => {
   it('shows the legacy hologram as Mesh and keeps the dim backdrop when re-picking Mesh', () => {
     expect(previewStyleOf('hologram')).toBe('mesh')
     expect(previewStyleOf('skeleton')).toBe('skeleton')
-    expect(storedStyleFor('mesh', 'hologram')).toBe('hologram')
-    expect(storedStyleFor('mesh', 'skeleton')).toBe('mesh')
-    expect(storedStyleFor('off', 'hologram')).toBe('off')
-    expect(storedStyleFor('skeleton', 'mesh')).toBe('skeleton')
   })
   it('formats mesh strength as a clamped percent', () => {
     expect(meshPercent(0.45)).toBe('45%')

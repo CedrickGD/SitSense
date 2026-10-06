@@ -10,6 +10,7 @@ import {
   type AiShareMode
 } from '@shared/ai'
 import type { CalibrationBaseline } from '@shared/posture'
+import { isUsableConnection, keyRequired } from '@renderer/ai/helpers'
 import { fmtRelative } from '@renderer/lib/format'
 
 /** The UI is English: dates use a fixed locale, not the system's (no "2. Okt."). */
@@ -288,27 +289,31 @@ export function shareDisclosure(share: AiShareMode, recipients: string | readonl
     share === 'sketch'
       ? 'a drawing of your pose (lines and dots on a plain background, no camera image)'
       : 'one small still from your camera (at most 640 px), which shows you and the room behind you'
+  // the coach asks the connections in the same order, so the fallback sentence covers both
   const fallback = rest.length ? ` If that one can’t answer, the same goes to ${rest.join(', then ')}.` : ''
-  return `Only when setup double-checks your posture, you ask the coach or you press Check my posture, SitSense sends ${what}, plus the angles it measured, to ${first}.${fallback} Nothing is sent in the background, and nothing is sent while monitoring is paused.`
+  return (
+    `When you press Check my posture now or setup double-checks your posture, SitSense sends ${what}, plus the angles it measured, to ${first}.${fallback}` +
+    ' When you message the coach, it sends your words, the recent conversation and the items ticked under “What your coach sees” (today’s stats, your saved posture, live numbers) to the same connection — never an image.' +
+    ' Nothing is sent in the background. While monitoring is paused nothing from the camera leaves this PC (no image, no live numbers); coach questions are still answered.'
+  )
 }
 
 // ---------- AI status line (Settings › AI models hero) ----------
 
 /**
- * Why a connection can't be called yet ('Needs a key' …), or null when it can. Mirrors
- * isUsableConnection (CameraFeed.tsx) / main's isUsable, minus the enabled switch.
+ * Why a connection can't be called yet ('Needs a key' …), or null when it can. The reasons
+ * behind isUsableConnection (ai/helpers.ts) / main's isUsable, minus the enabled switch.
  */
 export function connectionProblem(c: Pick<AiConnection, 'kind' | 'model' | 'hasKey' | 'baseUrl'>): string | null {
-  const keyRequired = AI_PRESETS.find((p) => p.kind === c.kind)?.keyRequired ?? true
   if (c.kind === 'openai-compatible' && !c.baseUrl) return 'Needs a server address'
-  if (keyRequired && !c.hasKey) return 'Needs a key'
+  if (keyRequired(c.kind) && !c.hasKey) return 'Needs a key'
   if (c.model.trim().length === 0) return 'Needs a model'
   return null
 }
 
-/** What a request would really call: on, and nothing missing. */
+/** What a request would really call: on, and nothing missing (the shared predicate). */
 export function connectionUsable(c: AiConnection): boolean {
-  return c.enabled && connectionProblem(c) === null
+  return isUsableConnection(c)
 }
 
 export type AiStatus =

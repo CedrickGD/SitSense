@@ -10,11 +10,11 @@ import { create } from 'zustand'
 import { aiErrorMessage, type AiChatReply } from '@shared/ai'
 import type { StatsRange } from '@shared/stats'
 import { useAppStore } from '@renderer/state/store'
-import { usableConnections } from '@renderer/components/CameraFeed'
+import { usableConnections } from '@renderer/ai/helpers'
 import { detectionController } from '@renderer/detection/controller'
 import { isSeen } from '@renderer/detection/pose-geometry'
 import { capAssistantText } from './markdown'
-import { fromStored, newMessageId, toAiMessages, toStored } from './chat'
+import { fromStored, newMessageId, replyRow, toAiMessages, toStored } from './chat'
 import { buildContext, liveKey, type CoachContextInputs } from './context'
 import { DEFAULT_CONTEXT_TOGGLES, type CheckSketch, type CoachContextToggles, type CoachMessage } from './types'
 
@@ -108,6 +108,8 @@ export function contextInputs(range: StatsRange | null): CoachContextInputs {
     paused,
     live: !paused && s.detection.running && !s.detection.cameraError && !s.detectorError,
     calibrated: !!s.settings?.calibration && !s.baselineCameraMismatch,
+    // setup was done, with another camera: the coach must not hear "never set up"
+    baselineCameraMismatch: !!s.settings?.calibration && s.baselineCameraMismatch,
     sitting: s.sitting,
     range,
     baseline: s.settings?.calibration ?? null,
@@ -122,6 +124,21 @@ function sketchFromPose(): CheckSketch | undefined {
   const pose = useAppStore.getState().pose
   if (!pose) return undefined
   return { points: pose.image.map((p) => (isSeen(p) ? ([p.x, p.y] as [number, number]) : null)), aspect: pose.aspect }
+}
+
+/**
+ * Stop the chat main is still running, so an abandoned question stops spending provider
+ * tokens (ui-v3 §4.4). Main also replaces an abandoned chat when the next one arrives, so
+ * a new question never waits for it (IPC 'ai:chat-cancel' → AiService.cancelChat).
+ */
+function cancelChatInMain(): void {
+  const api = window.sitsense
+  if (typeof api.aiChatCancel !== 'function') return
+  try {
+    void api.aiChatCancel().catch(() => undefined)
+  } catch {
+    // best effort: main drops the chat anyway when the next question arrives
+  }
 }
 
 // ───────────────────────────── the store ─────────────────────────────
@@ -162,18 +179,13 @@ export const useCoachStore = create<CoachState>((set, get) => {
       .catch((err): AiChatReply => ({ ok: false, message: aiErrorMessage(err) }))
     if (my !== token) return // stopped or cleared meanwhile
     setPending(null)
-    if (res.ok) {
-      push(
-        msg({
-          role: 'assistant',
-          kind: 'text',
-          text: capAssistantText(res.reply),
-          meta: { label: res.connectionLabel, model: res.model, fallbackFrom: res.connectionLabel !== primary.label ? primary.label : null }
-        })
-      )
+    // main decides whether a fallback answered and whether a failure is the model's
+    const row = replyRow(res)
+    if (row.kind === 'text') {
+      push(msg({ role: 'assistant', kind: 'text', text: capAssistantText(row.text), meta: row.meta }))
       set((s) => ({ promptSeed: s.promptSeed + 1 }))
     } else {
-      push(msg({ role: 'assistant', kind: 'error', text: res.message, retryOf: userId, fromModel: true }))
+      push(msg({ role: 'assistant', kind: 'error', text: row.text, retryOf: userId, fromModel: row.fromModel }))
     }
   }
 
@@ -286,6 +298,7 @@ export const useCoachStore = create<CoachState>((set, get) => {
       token++
       setPending(null)
       if (p.kind === 'check') detectionController.dismissAiCheck()
+      else cancelChatInMain()
       push(note('Stopped'))
     },
     clear: () => {
@@ -294,6 +307,7 @@ export const useCoachStore = create<CoachState>((set, get) => {
       if (p) {
         setPending(null)
         if (p.kind === 'check') detectionController.dismissAiCheck()
+        else cancelChatInMain()
       }
       lastLiveKey = null
       set({ messages: [note('Conversation cleared')] })

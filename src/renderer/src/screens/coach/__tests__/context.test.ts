@@ -124,6 +124,19 @@ describe('live context', () => {
     expect(noSetup?.calibrated).toBe(false)
   })
 
+  it('a baseline saved with another camera: flagged, not judged, never "not set up"', () => {
+    const other = buildLiveContext(inputs({ calibrated: false, baselineCameraMismatch: true }))
+    expect(other).toMatchObject({ calibrated: false, baselineOtherCamera: true })
+    expect(other?.issues).toBeUndefined()
+    expect(other?.worstStage).toBeUndefined()
+    // no saved baseline at all: no flag
+    expect(buildLiveContext(inputs({ calibrated: false, baselineCameraMismatch: true, baseline: null }))?.baselineOtherCamera).toBeUndefined()
+    expect(buildLiveContext(inputs())?.baselineOtherCamera).toBeUndefined()
+    const ctx = buildContext(inputs({ calibrated: false, baselineCameraMismatch: true }), DEFAULT_CONTEXT_TOGGLES)
+    expect(ctx?.live).toMatchObject({ baselineOtherCamera: true })
+    expect(ctx?.baseline).toBeDefined()
+  })
+
   it('leaves out issues the user switched off', () => {
     const live = buildLiveContext(inputs({ enabledIssues: { headForward: false } }))
     expect(live?.issues?.headForward).toBeUndefined()
@@ -173,6 +186,7 @@ describe('previews', () => {
     expect(livePreview(inputs({ snapshot: snap() })).lines[0]).toBe('Aligned · Neck +4° · Back −1°')
     expect(livePreview(inputs({ paused: true }))).toEqual({ available: false, lines: ['Paused — live numbers aren’t shared'] })
     expect(livePreview(inputs({ calibrated: false })).lines).toEqual(['In view · posture not set up yet'])
+    expect(livePreview(inputs({ calibrated: false, baselineCameraMismatch: true })).lines).toEqual(['In view · set up with a different camera — not judged'])
   })
 
   it('today: aligned share and time, the worst issue and breaks', () => {
@@ -183,6 +197,7 @@ describe('previews', () => {
   it('baseline: view, verified and age', () => {
     expect(baselinePreview(inputs()).lines).toEqual(['Side view · verified', 'Set up 2 days ago'])
     expect(baselinePreview(inputs({ baseline: null }))).toEqual({ available: false, lines: ['Not set up yet'] })
+    expect(baselinePreview(inputs({ calibrated: false, baselineCameraMismatch: true })).lines[0]).toBe('Side view · verified · other camera')
   })
 
   it('liveKey changes when the state changes a lot', () => {

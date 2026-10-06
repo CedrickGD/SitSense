@@ -2,6 +2,8 @@
 // helpers behind the controls. Unit-tested in __tests__/meta.test.ts.
 
 import type { IssueId } from '@shared/posture'
+import { BREAK_AWAY_MINUTES } from '@shared/ipc'
+import type { UpdateMode } from '@shared/update'
 import {
   DEFAULT_SETTINGS,
   MESH_INTENSITY_RANGE,
@@ -95,11 +97,24 @@ const NAV_CHROME = 8 + 24
  * list only while the cards beside it still get their 2-column grid. Otherwise the list
  * folds into a chip row so the cards use the full width — a wider window never ends up
  * with fewer columns than a narrower one.
+ *
+ * `prev` (the mode on screen) adds hysteresis: switching to a WIDER-list mode needs
+ * NAV_MODE_HYSTERESIS px beyond the threshold, more than a scrollbar (10 px). The page
+ * height depends on the mode (a side list makes the cards narrower, so taller), and a
+ * scrollbar appearing/disappearing changes the measured width — without the margin those
+ * two can feed each other and flip list ↔ chips every frame. Narrowing never waits, so
+ * a side list never sits beside a 1-column grid.
  */
-export function categoryNavMode(availableWidth: number): CategoryNavMode {
-  const fits = (list: number): boolean => availableWidth - list - NAV_CHROME >= SETTINGS_GRID_MIN
-  if (fits(CATEGORY_NAV_WIDTH.full ?? 0)) return 'full'
-  if (fits(CATEGORY_NAV_WIDTH.compact ?? 0)) return 'compact'
+export const NAV_MODE_HYSTERESIS = 16
+const NAV_MODE_RANK: Record<CategoryNavMode, number> = { chips: 0, compact: 1, full: 2 }
+
+export function categoryNavMode(availableWidth: number, prev?: CategoryNavMode): CategoryNavMode {
+  const fits = (mode: 'full' | 'compact'): boolean => {
+    const margin = prev !== undefined && NAV_MODE_RANK[mode] > NAV_MODE_RANK[prev] ? NAV_MODE_HYSTERESIS : 0
+    return availableWidth - (CATEGORY_NAV_WIDTH[mode] ?? 0) - NAV_CHROME >= SETTINGS_GRID_MIN + margin
+  }
+  if (fits('full')) return 'full'
+  if (fits('compact')) return 'compact'
   return 'chips'
 }
 
@@ -110,12 +125,6 @@ export type PreviewStyle = 'skeleton' | 'mesh' | 'off'
 
 export function previewStyleOf(style: OverlayStyle): PreviewStyle {
   return style === 'hologram' ? 'mesh' : style
-}
-
-/** The stored style for a picked style, keeping "dim camera behind mesh". */
-export function storedStyleFor(picked: PreviewStyle, current: OverlayStyle): OverlayStyle {
-  if (picked === 'mesh') return current === 'hologram' ? 'hologram' : 'mesh'
-  return picked
 }
 
 export const STYLE_COPY: Record<PreviewStyle, string> = {
@@ -208,8 +217,8 @@ export const TOAST_PREVIEW: Record<IssueId, Record<1 | 2 | 3, { title: string; b
   }
 }
 
-/** Minutes away from the desk that end a sitting stretch (main/break-tracker.ts). */
-export const BREAK_AWAY_MINUTES = 3
+/** Minutes away from the desk that end a sitting stretch (shared; main/break-tracker.ts). */
+export { BREAK_AWAY_MINUTES }
 
 export function breakHint(awayMinutes: number = BREAK_AWAY_MINUTES): string {
   return `SitSense notices when you leave your desk — walking away for ${awayMinutes} minutes counts as a break. No need to tell it.`
@@ -264,11 +273,28 @@ function stableJson(v: unknown): string {
   )
 }
 
-/** Privacy › Can leave this PC: what an update check sends (src/main/updater.ts). */
-export function updateCheckLine(autoCheck: boolean): string {
+/**
+ * Privacy › Can leave this PC: what an update check sends and fetches (src/main/updater.ts).
+ * An installed copy downloads a newer installer in the background right after the check
+ * (autoDownload); a portable copy only checks. Unknown mode (status not loaded yet) reads
+ * as installed, so the line never under-states the traffic.
+ */
+export function updateCheckLine(autoCheck: boolean, mode: UpdateMode | null): string {
+  if (mode === 'portable') {
+    return autoCheck
+      ? 'Update checks: SitSense asks GitHub for its latest version shortly after it starts and every 6 hours. No posture data, camera image or settings are sent.'
+      : 'Update checks: only when you press “Check for updates” in About. No posture data, camera image or settings are sent.'
+  }
   return autoCheck
-    ? 'Update checks: SitSense asks GitHub for its latest version shortly after it starts and every 6 hours. No posture data, camera image or settings are sent.'
-    : 'Update checks: only when you press “Check for updates” in About. No posture data, camera image or settings are sent.'
+    ? 'Update checks: SitSense asks GitHub for its latest version shortly after it starts and every 6 hours, and downloads a newer version from GitHub in the background when there is one. No posture data, camera image or settings are sent.'
+    : 'Update checks: only when you press “Check for updates” in About (a newer version then downloads right away). No posture data, camera image or settings are sent.'
+}
+
+/** Privacy › Can leave this PC with AI off and automatic checks on: the summary sentence. */
+export function updateOnlyRequestLine(mode: UpdateMode | null): string {
+  return mode === 'portable'
+    ? 'With AI models off, the only request SitSense makes is asking GitHub for its latest version.'
+    : 'With AI models off, SitSense only talks to GitHub: it asks for its latest version and downloads a newer one in the background when there is one.'
 }
 
 /** "2 keys, encrypted with Windows" / "No keys saved" */
@@ -292,6 +318,7 @@ export const SHORTCUTS: { keys: string[]; label: string }[] = [
   { keys: ['Ctrl', ','], label: 'Open Settings' },
   { keys: ['Ctrl', 'L'], label: 'Ask the coach' },
   { keys: ['Ctrl', 'Shift', 'P'], label: 'Pause or resume' },
+  { keys: ['Ctrl', 'W'], label: 'Hide to the tray' },
   { keys: ['Esc'], label: 'Leave posture setup' }
 ]
 

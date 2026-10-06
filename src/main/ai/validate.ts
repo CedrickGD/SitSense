@@ -117,6 +117,16 @@ const finiteOrNull = (v: unknown, name: string): number | null => {
   return v
 }
 
+/**
+ * The renderer's name for one posture review (cancelReview). Optional: undefined when
+ * absent; a short id of letters, digits, '-' and '_' otherwise.
+ */
+export function validateRequestId(v: unknown): string | undefined {
+  if (v === undefined || v === null) return undefined
+  if (typeof v !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v)) throw invalid('Invalid request id.')
+  return v
+}
+
 export function validateReviewRequest(v: unknown): AiReviewRequest {
   if (!isObj(v)) throw invalid('Invalid review request.')
   if (v.purpose !== 'setup' && v.purpose !== 'check') throw invalid('Invalid review purpose.')
@@ -246,13 +256,17 @@ function issueRecord<T>(v: unknown, pick: (x: unknown) => T | undefined): Partia
   return compact(out)
 }
 
-function sanitizeLive(l: Record<string, unknown>): AiChatLiveContext | undefined {
+/** The live block of the chat context (kept as a name for tests and coach.ts). */
+export type ChatLiveContext = AiChatLiveContext
+
+function sanitizeLive(l: Record<string, unknown>): ChatLiveContext | undefined {
   let localInstruction: string | null | undefined
   if (typeof l.localInstruction === 'string') localInstruction = cleanText(l.localInstruction).replace(/\s+/g, ' ').slice(0, 200) || null
   else if (l.localInstruction === null) localInstruction = null
-  return compact<AiChatLiveContext>({
+  return compact<ChatLiveContext>({
     presence: l.presence === 'active' || l.presence === 'away' ? l.presence : undefined,
     calibrated: optBool(l.calibrated),
+    baselineOtherCamera: optBool(l.baselineOtherCamera),
     view: optView(l.view),
     neckFwdDeg: optDeg(l.neckFwdDeg),
     trunkFwdDeg: optDeg(l.trunkFwdDeg),

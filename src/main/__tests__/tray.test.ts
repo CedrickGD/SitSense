@@ -76,6 +76,12 @@ describe('tray', () => {
     expect(tooltip()).toBe('SitSense — good posture')
   })
 
+  it('never says good posture while detection is suspended (view changed since setup)', () => {
+    trayPostureUpdate({ ...goodSnapshot, suspended: true })
+    expect(tooltip()).toBe('SitSense — view changed — redo posture setup')
+    expect((trays[trays.length - 1].image as { path: string }).path).not.toMatch(/good/i)
+  })
+
   it('does not show pre-pause posture after resuming (regression)', () => {
     trayPostureUpdate(goodSnapshot)
     setPause(true, null)

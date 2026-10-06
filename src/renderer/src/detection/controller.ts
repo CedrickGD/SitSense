@@ -22,8 +22,7 @@ import {
   type AiCheckState,
   type CameraUiState,
   type DetectorError,
-  type DetectorErrorReason,
-  type SetupUiState
+  type DetectorErrorReason
 } from '@renderer/state/store'
 import { CameraOpenError, listCameras, openCamera, stopStream } from './camera'
 import { FrameLoop } from './frame-loop'
@@ -33,13 +32,16 @@ import {
   IDLE_PROBE,
   NO_EXTRAS,
   SetupProbe,
+  SetupViewTracker,
   publishProbe,
   reviewFailNote,
+  reviewOutcome,
   setupReviewMeasurements,
   summarizeBaseline,
   toSetupUi,
   unverifiedPhrase,
-  type SetupExtras
+  type SetupExtras,
+  type SetupUi
 } from './setup-ui'
 
 const SNAPSHOT_MIN_INTERVAL_MS = 1000
@@ -83,6 +85,23 @@ class ModelLoadError extends Error {
 }
 
 /** Waits until the element has a decoded frame; false on timeout or when its source is removed. */
+let requestSeq = 0
+/** a fresh name for one posture review (validateRequestId: letters, digits, '-', '_') */
+const newRequestId = (kind: 'setup' | 'check'): string =>
+  `${kind}-${Date.now().toString(36)}-${(++requestSeq).toString(36)}`
+
+/** Tell main to drop a review the renderer abandoned (best effort; never throws). */
+function cancelReviewInMain(requestId: string | null): void {
+  if (!requestId) return
+  const api = window.sitsense
+  if (typeof api?.aiCancelReview !== 'function') return
+  try {
+    void api.aiCancelReview(requestId).catch(() => undefined)
+  } catch {
+    // main also frees the slot when the review finishes
+  }
+}
+
 function waitForFirstFrame(video: HTMLVideoElement, timeoutMs: number): Promise<boolean> {
   if (video.readyState >= 2) return Promise.resolve(true)
   return new Promise((resolve) => {
@@ -192,6 +211,8 @@ class DetectionController {
    */
   private setupStage: 'camera' | 'coach' = 'camera'
   private probe = new SetupProbe()
+  /** step 2's camera view chip (smoothed, with hysteresis) */
+  private setupView = new SetupViewTracker()
   private session: SetupSession | null = null
   private sessionDeviceId: string | null = null
   private lastSetupPhase: SetupPhase | null = null
@@ -201,6 +222,8 @@ class DetectionController {
   /** last GOOD frame pushed to the setup session (for the review sketch) */
   private lastSetupGood: { frame: PoseFrame; f: PostureFeatures } | null = null
   private reviewToken = 0
+  /** main's name for the setup review in flight (freed with aiCancelReview when abandoned) */
+  private setupReqId: string | null = null
   private failTimer: ReturnType<typeof setTimeout> | null = null
   /** whether this setup can afford the cosmetic face model (decided once per session) */
   private faceDuringSetup = true
@@ -208,6 +231,8 @@ class DetectionController {
   // ---- Ask AI ----
   private recent: RecentGood[] = []
   private aiToken = 0
+  /** main's name for the Ask AI review in flight */
+  private aiReqId: string | null = null
 
   // ---- publishing ----
   private latestSnapshot: PostureSnapshot | null = null
@@ -261,6 +286,8 @@ class DetectionController {
         this.setDetectorError(null)
         this.updateStatus({ cameraError: null })
       } else {
+        // setup is no longer paused, even if the camera can't start yet (busy, model error)
+        this.unsuspendSetup()
         this.retryDelay = RETRY_BASE_MS
         void this.start()
       }
@@ -455,6 +482,10 @@ class DetectionController {
     this.meshBuilder.reset()
     this.releaseFace()
     this.recent = []
+    // step 1's camera check must not keep "I can see you" (and an enabled Start) while no
+    // frames arrive; publishing an unchanged idle probe is a no-op outside setup
+    this.probe.reset()
+    publishProbe(IDLE_PROBE)
     const s = useAppStore.getState()
     if (s.pose || s.mesh) useAppStore.setState({ pose: null, mesh: null })
   }
@@ -562,7 +593,7 @@ class DetectionController {
   /** "Save this posture anyway" (only while setup.canForce). */
   forceSetup(): void {
     if (!this.session) return
-    if (this.lastSetupPhase === 'reviewing') this.reviewToken++ // ignore the pending review
+    if (this.lastSetupPhase === 'reviewing') this.abandonSetupReview() // ignore the pending review
     if (this.session.force()) this.afterSetupStep(this.session.state)
   }
 
@@ -573,7 +604,7 @@ class DetectionController {
       this.newSession()
       return
     }
-    this.reviewToken++
+    this.abandonSetupReview()
     this.clearFailTimer()
     this.setupExtras = { ...NO_EXTRAS }
     this.session.restart()
@@ -586,7 +617,7 @@ class DetectionController {
    */
   skipSetupReview(): void {
     if (!this.session || this.lastSetupPhase !== 'reviewing') return
-    this.reviewToken++
+    this.abandonSetupReview()
     const unverified = this.lastSetupState?.unverifiedChecks ?? []
     const note =
       unverified.length > 0
@@ -607,6 +638,12 @@ class DetectionController {
       this.setSetupUi({ ...IDLE_SETUP, suspended: 'paused' })
       return
     }
+    // nobody can see the coach (closed to the tray, minimized): no session runs hidden — it
+    // starts when the window is shown again (onVisibility)
+    if (!this.windowVisible) {
+      this.setSetupUi(IDLE_SETUP)
+      return
+    }
     this.session = new SetupSession({
       review: aiReviewsSetup(this.settings),
       cameraDeviceId: this.activeDeviceId
@@ -620,13 +657,14 @@ class DetectionController {
   }
 
   private dropSession(): void {
-    this.reviewToken++
+    this.abandonSetupReview()
     this.clearFailTimer()
     this.session = null
     this.lastSetupPhase = null
     this.lastSetupState = null
     this.lastSetupGood = null
     this.setupUiKey = ''
+    this.setupView.reset()
     this.applyLoopFps()
   }
 
@@ -639,6 +677,16 @@ class DetectionController {
     this.probe.reset()
     publishProbe(IDLE_PROBE)
     this.setSetupUi({ ...IDLE_SETUP, suspended: 'paused' })
+  }
+
+  /**
+   * Resume: setup is no longer paused, even while the camera can't start yet (another app
+   * holds it, the model fails) — the setup screen then shows that problem, not "paused".
+   * onCaptureStarted() starts the probe or the session once the camera is open.
+   */
+  private unsuspendSetup(): void {
+    if (!this.setupWanted || this.session) return // the Done screen keeps its session
+    if (useAppStore.getState().setup.suspended) this.setSetupUi(IDLE_SETUP)
   }
 
   /** The camera (re)started. */
@@ -660,6 +708,7 @@ class DetectionController {
       this.newSession()
       return
     }
+    this.setupView.reset()
     // frames from before the gap must not merge with frames after it
     if (phase === 'holding' || phase === 'capturing') {
       this.session.restart()
@@ -671,6 +720,7 @@ class DetectionController {
     if (!this.session) return
     const st = this.session.push(frame, t)
     if (frame && st.features) this.lastSetupGood = { frame, f: st.features }
+    this.setupView.push(st, t)
     this.afterSetupStep(st)
   }
 
@@ -691,10 +741,10 @@ class DetectionController {
   }
 
   private publishSetup(st: SetupState): void {
-    this.setSetupUi(toSetupUi(st, this.setupExtras))
+    this.setSetupUi(toSetupUi(st, this.setupExtras, this.setupView.view))
   }
 
-  private setSetupUi(ui: SetupUiState): void {
+  private setSetupUi(ui: SetupUi): void {
     const key = JSON.stringify(ui)
     if (key === this.setupUiKey) return
     this.setupUiKey = key
@@ -721,12 +771,23 @@ class DetectionController {
     this.failTimer = null
   }
 
+  /**
+   * Ignore the setup review in flight and tell main to drop it, so its single review slot is
+   * free for the next capture or an Ask AI check at once.
+   */
+  private abandonSetupReview(): void {
+    this.reviewToken++
+    cancelReviewInMain(this.setupReqId)
+    this.setupReqId = null
+  }
+
   /** Entered 'reviewing' (once per capture): ask the connected model to double-check. */
   private beginReview(st: SetupState): void {
     const session = this.session
     const baseline = session?.pendingBaseline
     if (!session || !baseline) return
-    const token = ++this.reviewToken
+    this.abandonSetupReview()
+    const token = this.reviewToken
     const settings = this.settings
     const conn = primaryAiConnection(settings)
     // decided async so the phase bookkeeping of this step completes first
@@ -741,6 +802,8 @@ class DetectionController {
     const fail = (message: string): string => reviewFailNote(conn?.label ?? null, message, st.unverifiedChecks)
     if (!settings || !conn || !aiAvailable(settings)) return skip(fail('no AI model is turned on'))
     if (useAppStore.getState().pause.paused) return skip(fail('monitoring is paused'))
+    // never capture (or send) an image while nobody can see the setup screen
+    if (!this.windowVisible) return skip(fail('the SitSense window is hidden'))
 
     let image: string
     try {
@@ -757,7 +820,10 @@ class DetectionController {
     }
 
     this.setupExtras = { ...this.setupExtras, reviewing: { label: conn.label }, reviewNote: null }
+    const requestId = newRequestId('setup')
+    this.setupReqId = requestId
     const req: AiReviewRequest = {
+      requestId,
       purpose: 'setup',
       imageJpegB64: image,
       share: settings.ai.share,
@@ -767,7 +833,10 @@ class DetectionController {
     window.sitsense
       .aiReviewPosture(req)
       .catch((err): AiPostureReview => ({ ok: false, message: aiErrorMessage(err) }))
-      .then((res) => this.onSetupReview(token, session, res))
+      .then((res) => {
+        if (this.setupReqId === requestId) this.setupReqId = null
+        this.onSetupReview(token, session, res)
+      })
   }
 
   private onSetupReview(token: number, session: SetupSession, res: AiPostureReview): void {
@@ -777,13 +846,8 @@ class DetectionController {
         ...this.setupExtras,
         reviewing: null,
         reviewNote: null,
-        reviewResult: {
-          label: res.connectionLabel,
-          model: res.model,
-          verdict: res.verdict,
-          summary: res.summary,
-          instructions: [...res.instructions]
-        }
+        // still the 'reviewing' state: what the reviewer was asked to judge (acceptReview clears it)
+        reviewResult: reviewOutcome(res, this.lastSetupState)
       }
       if (res.verdict === 'good') session.acceptReview()
       else session.rejectReview(res.instructions[0] ?? res.summary)
@@ -885,15 +949,19 @@ class DetectionController {
       })
     }
     const token = ++this.aiToken
+    const requestId = newRequestId('check')
+    this.aiReqId = requestId
     this.setAiCheck({ status: 'pending', label: conn.label, review: null, message: null })
     const res = await window.sitsense
       .aiReviewPosture({
+        requestId,
         purpose: 'check',
         imageJpegB64: image,
         share: settings.ai.share,
         measurements: measurementsFromFeatures(features, assessment)
       })
       .catch((err): AiPostureReview => ({ ok: false, message: aiErrorMessage(err) }))
+    if (this.aiReqId === requestId) this.aiReqId = null
     if (token !== this.aiToken) return // dismissed, paused or superseded meanwhile
     if (res.ok) this.setAiCheck({ status: 'done', label: res.connectionLabel, review: res, message: null })
     else this.setAiCheck({ status: 'error', label: conn.label, review: null, message: res.message })
@@ -901,13 +969,20 @@ class DetectionController {
 
   /** Close the Ask AI card (also ignores a result still on its way). */
   dismissAiCheck(): void {
-    this.aiToken++
+    this.abandonAiReview()
     this.setAiCheck(IDLE_AI_CHECK)
   }
 
   private cancelAiCheck(): void {
     if (useAppStore.getState().aiCheck.status !== 'idle') this.dismissAiCheck()
-    else this.aiToken++
+    else this.abandonAiReview()
+  }
+
+  /** Ignore the Ask AI review in flight and free main's review slot (aiCancelReview). */
+  private abandonAiReview(): void {
+    this.aiToken++
+    cancelReviewInMain(this.aiReqId)
+    this.aiReqId = null
   }
 
   private setAiCheck(s: AiCheckState): void {
@@ -918,16 +993,18 @@ class DetectionController {
 
   private async processFrame(): Promise<void> {
     if (!this.landmarker || !this.video || !this.engine) return
+    // the capture this frame belongs to (a release while syncMasks() awaits makes it stale)
+    const gen = this.captureGen
     await this.syncMasks()
     const t = performance.now()
     try {
-      await this.processDetections(t)
+      await this.processDetections(t, gen)
     } finally {
       this.frameCostMs = performance.now() - t
     }
   }
 
-  private async processDetections(t: number): Promise<void> {
+  private async processDetections(t: number, gen: number = this.captureGen): Promise<void> {
     const landmarker = this.landmarker
     const video = this.video
     const engine = this.engine
@@ -961,10 +1038,15 @@ class DetectionController {
     if (setupLive) this.pushSetup(frame, t)
 
     const { snapshot, alerts } = engine.processFrame(frame, t)
-    // no nudges while the setup flow is open (camera check, coaching, Saved)
-    if (!setupLive && !this.setupWanted) for (const alert of alerts) window.sitsense.sendAlert(alert)
-    // setup step 1: report what the camera can see (no session runs yet)
-    if (this.setupWanted && this.setupStage === 'camera') publishProbe(this.probe.push(engine.lastFeatures, t))
+    // no nudges while someone can see the setup flow (camera check, coaching, Saved); once
+    // the window is hidden (closed to the tray, minimized) SitSense monitors as usual
+    const setupHoldsNudges = this.windowVisible && (setupLive || this.setupWanted)
+    if (!setupHoldsNudges) for (const alert of alerts) window.sitsense.sendAlert(alert)
+    // setup step 1: report what the camera can see (no session runs yet), measured as the
+    // session will measure it — never with the saved baseline's gravity or hip setting
+    if (this.setupWanted && this.setupStage === 'camera' && gen === this.captureGen) {
+      publishProbe(this.probe.push(frame, t))
+    }
     this.maybeSendSnapshot(snapshot, t)
     this.publishSnapshot(snapshot, t)
 
@@ -975,7 +1057,11 @@ class DetectionController {
     while (this.recent.length > 0 && t - this.recent[0].t > RECENT_MS) this.recent.shift()
 
     const overlayFeatures = setupLive ? (this.lastSetupState?.features ?? null) : features
-    this.publishPose(frame, overlayFeatures, snapshot, mesh, t)
+    // a pose that is not the seated user (a print on the desk, a poster, someone far
+    // behind) is neither drawn nor reported as "seeing you"
+    const reject = setupLive ? this.lastSetupState?.frameReject : engine.frameReject
+    const notUser = reject === 'too-far' || reject === 'not-upright'
+    this.publishPose(notUser ? null : frame, overlayFeatures, snapshot, notUser ? null : mesh, t)
   }
 
   private onInferenceOk(t: number): void {
@@ -1206,7 +1292,7 @@ class DetectionController {
   /** The store's snapshot changes only when something on screen would (or ~1×/s while visible). */
   private publishSnapshot(s: PostureSnapshot, t: number): void {
     this.latestSnapshot = s
-    const key = `${s.presence}|${s.worstStage}|${s.calibrated}|${s.recalibrationSuggested}|${ISSUES.map(
+    const key = `${s.presence}|${s.worstStage}|${s.calibrated}|${s.recalibrationSuggested}|${s.suspended === true}|${ISSUES.map(
       (i) => s.issues[i].stage
     ).join(',')}|${s.issues.lean.direction ?? ''}|${s.readout?.view ?? ''}`
     const due = this.windowVisible && t - this.lastUiSnapshotAt >= UI_SNAPSHOT_INTERVAL_MS
@@ -1230,10 +1316,28 @@ class DetectionController {
       patch.mesh = null
     }
     useAppStore.setState(patch)
+    this.syncSetupVisibility(visible)
+  }
+
+  /**
+   * Coaching only runs while someone can see it. Hidden (closed to the tray, minimized), the
+   * session is dropped: no raised frame rate, no capture, no review image; nudges resume
+   * (processDetections). Shown again, coaching starts over. A finished setup (Done) stays.
+   */
+  private syncSetupVisibility(visible: boolean): void {
+    if (!this.setupWanted || this.setupStage !== 'coach') return
+    if (!visible) {
+      if (this.session && this.lastSetupPhase !== 'done') {
+        this.dropSession()
+        this.setSetupUi(IDLE_SETUP)
+      }
+    } else if (!this.session) {
+      this.newSession()
+    }
   }
 
   private maybeSendSnapshot(snapshot: PostureSnapshot, t: number): void {
-    const key = `${snapshot.presence}|${snapshot.worstStage}|${snapshot.calibrated}`
+    const key = `${snapshot.presence}|${snapshot.worstStage}|${snapshot.calibrated}|${snapshot.suspended === true}`
     if (key !== this.lastSnapshotKey || t - this.lastSnapshotSentAt >= SNAPSHOT_MIN_INTERVAL_MS) {
       this.lastSnapshotKey = key
       this.lastSnapshotSentAt = t

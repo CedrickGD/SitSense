@@ -15,6 +15,18 @@ export function meshIntensityOf(overlay: unknown): number {
   return Math.min(MESH_INTENSITY_MAX, Math.max(MESH_INTENSITY_MIN, raw))
 }
 
+/**
+ * Whether the mesh draws over a dimmed camera image: the backdrop is its own setting
+ * (`overlay.meshBackdrop: 'camera' | 'dim'`), so switching the style can never clear it.
+ * The legacy style value 'hologram' still reads as a dimmed mesh. Read defensively: older
+ * settings files have no meshBackdrop.
+ */
+export function meshDimsBackdrop(overlay: unknown): boolean {
+  if (!overlay || typeof overlay !== 'object') return false
+  const o = overlay as { style?: unknown; meshBackdrop?: unknown }
+  return o.style === 'hologram' || (o.style === 'mesh' && o.meshBackdrop === 'dim')
+}
+
 /** Everything the painter needs to know about line weight and effects. Widths are in CSS px. */
 export interface MeshLook {
   /** lattice spacing multiplier for the mesh builder (1 = densest) */

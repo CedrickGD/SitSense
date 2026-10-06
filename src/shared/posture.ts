@@ -42,6 +42,8 @@ export interface PostureReadout {
   drop: number | null
   forward: number | null
   lateral: number | null
+  /** which segment `lateral` was measured from (a neck tilt has its own stage thresholds) */
+  lateralFrom?: 'trunk' | 'neck'
 }
 
 export interface PostureSnapshot {
@@ -51,6 +53,11 @@ export interface PostureSnapshot {
   calibrated: boolean
   /** the camera view has drifted far from the calibrated distance for a while */
   recalibrationSuggested: boolean
+  /**
+   * every detector is paused because the view is far off the setup distance: posture is
+   * not judged until the view comes back or setup is redone. Optional for older producers.
+   */
+  suspended?: boolean
   readout?: PostureReadout
   ts: number
 }

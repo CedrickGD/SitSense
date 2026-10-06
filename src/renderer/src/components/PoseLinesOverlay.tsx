@@ -16,6 +16,7 @@
 import { useRef, type CSSProperties, type JSX } from 'react'
 import type { Stage } from '@shared/posture'
 import { STAGE_COLOR } from '@renderer/lib/ui'
+import { isSuspended, NOT_JUDGED_COLOR } from '@renderer/lib/score'
 import { LM } from '@renderer/posture/constants'
 import type { Landmark } from '@renderer/posture/types'
 import { isSeen } from '@renderer/detection/pose-geometry'
@@ -287,6 +288,9 @@ export default function PoseLinesOverlay({
 }): JSX.Element | null {
   const pose = useAppStore((s) => s.pose)
   const fps = useAppStore((s) => s.detection.targetFps)
+  // suspended detectors report every segment at stage 0 without judging it: in posture
+  // mode that must read neutral, not the sage that means "good"
+  const suspended = useAppStore((s) => s.snapshot?.presence === 'active' && isSuspended(s.snapshot))
   // the near side carries over between pose updates (hysteresis). Advanced once per pose
   // object, so a re-render without a new pose (or a StrictMode double render) doesn't count.
   const sideRef = useRef<{ pose: PoseOverlayData | null; state: SideState | null }>({ pose: null, state: null })
@@ -296,5 +300,14 @@ export default function PoseLinesOverlay({
   if (!pose) return null
   // ease over most of one detection interval; poses are published at ≤ 15 Hz
   const easeMs = Math.min(180, (1000 / Math.max(1, Math.min(fps, 15))) * 0.85)
-  return <LinesSvg pose={pose} side={sideRef.current.state?.side} mode={mode} color={color} easeMs={easeMs} />
+  const neutral = suspended && mode === 'posture'
+  return (
+    <LinesSvg
+      pose={pose}
+      side={sideRef.current.state?.side}
+      mode={neutral ? 'fixed' : mode}
+      color={neutral ? NOT_JUDGED_COLOR : color}
+      easeMs={easeMs}
+    />
+  )
 }

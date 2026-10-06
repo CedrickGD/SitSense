@@ -82,10 +82,27 @@ describe('BreakTracker', () => {
     expect(k.t.state(k.now(), 0)).toMatchObject({ onBreak: false, breakSince: null, sittingSince: null })
   })
 
-  it('a break after a short stretch resets the timer but is not counted', () => {
+  it('a break after a short stretch resets the timer and is counted', () => {
     const k = setup()
     k.run(10 * MIN, 'sitting')
     k.run(5 * MIN, 'absent')
+    expect(k.breaks()).toBe(1)
+    expect(k.t.state(k.now(), 1).sittingSince).toBeNull()
+  })
+
+  it('standing up for 5 min every 15 min counts every break', () => {
+    const k = setup()
+    for (let i = 0; i < 4; i++) {
+      k.run(15 * MIN, 'sitting')
+      k.run(5 * MIN, 'absent')
+    }
+    expect(k.breaks()).toBe(4)
+  })
+
+  it('a stray sitting blip followed by an empty chair is not a break', () => {
+    const k = setup()
+    k.run(15_000, 'sitting')
+    k.run(10 * MIN, 'absent')
     expect(k.breaks()).toBe(0)
     expect(k.t.state(k.now(), 0).sittingSince).toBeNull()
   })

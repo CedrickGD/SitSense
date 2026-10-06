@@ -119,6 +119,8 @@ function computeState(): TrayState {
   if (!lastSnapshot) return 'off'
   if (!lastSnapshot.calibrated) return 'off'
   if (lastSnapshot.presence === 'away') return 'away'
+  // nothing is judged while the view is far off the setup distance: neutral, not "good"
+  if (lastSnapshot.suspended === true) return 'off'
   if (lastSnapshot.worstStage >= 3) return 'bad'
   if (lastSnapshot.worstStage >= 1) return 'warn'
   return 'good'
@@ -132,6 +134,7 @@ function statusText(): string {
   if (!lastSnapshot) return 'not detecting'
   if (!lastSnapshot.calibrated) return 'not calibrated'
   if (lastSnapshot.presence === 'away') return 'away'
+  if (lastSnapshot.suspended === true) return 'view changed — redo posture setup'
   if (lastSnapshot.worstStage === 0) return 'good posture'
   const worst = Object.values(lastSnapshot.issues).reduce((a, b) => (b.stage > a.stage ? b : a))
   return `${ISSUE_LABELS[worst.issue]} (${stageLabel(worst.stage)})`

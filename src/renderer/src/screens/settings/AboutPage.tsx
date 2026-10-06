@@ -9,7 +9,7 @@ import { Button, Kbd, ProgressBar, Spinner, Toggle } from '@renderer/components/
 import { useAppStore } from '@renderer/state/store'
 import { SHORTCUTS } from './meta'
 import { CardFooter, GroupDivider, SettingRow, SettingsCard, SettingsGrid, useCommit } from './parts'
-import { UPDATE_PRIVACY_NOTE, updateCardView, type UpdateTone } from './update-view'
+import { updateCardView, updatePrivacyNote, type UpdateTone } from './update-view'
 
 const CREDITS: { what: string; who: string; license: string }[] = [
   { what: 'Pose tracking', who: 'MediaPipe', license: 'Apache 2.0' },
@@ -173,7 +173,7 @@ function UpdatesCard({ settings }: { settings: Settings }): JSX.Element {
       <div className="mt-3">
         <SettingRow
           label="Check automatically"
-          description={UPDATE_PRIVACY_NOTE}
+          description={updatePrivacyNote(status?.mode ?? null)}
           descriptionId={noteId}
           savedKey="updates.autoCheck"
           control={

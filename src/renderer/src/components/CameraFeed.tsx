@@ -8,22 +8,30 @@
 import { useEffect, useId, useRef, useState, type JSX, type ReactNode } from 'react'
 import type { CameraError } from '@shared/posture'
 import { DEFAULT_SETTINGS, OVERLAY_PRESETS, type OverlaySettings, type OverlayStyle, type Settings } from '@shared/settings'
-import { AI_PRESETS, type AiConnection, type AiProviderKind } from '@shared/ai'
+import type { AiConnection } from '@shared/ai'
+import { isUsableConnection, usableConnections } from '@renderer/ai/helpers'
 import { detectionController } from '@renderer/detection/controller'
 import { useAppStore } from '@renderer/state/store'
 import { STAGE_COLOR } from '@renderer/lib/ui'
 import { fmtCountdown } from '@renderer/lib/format'
+import { isSuspended, NOT_JUDGED_COLOR } from '@renderer/lib/score'
+import { meshDimsBackdrop } from '@renderer/overlay/meshLook'
 import { poseTracking, trackingLevel, TRACKING_COPY, type TrackingLevel } from '@renderer/screens/live/liveModel'
 import MeshOverlay from './MeshOverlay'
 import PoseLinesOverlay from './PoseLinesOverlay'
 import { Button, IconButton, SegmentedControl, StatusDot, Tooltip, type SegmentOption } from './primitives'
 import { Icon } from './icons'
 
-/** CSS color of the overlay for the current settings (posture mode follows the worst stage). */
+/**
+ * CSS color of the overlay for the current settings (posture mode follows the worst stage;
+ * neutral while the detectors are suspended, since their stage 0 is no judgment).
+ */
 function useOverlayColor(overlay: OverlaySettings): string {
-  // a primitive selector: re-renders only when the worst stage changes
-  const stage = useAppStore((s) => (s.snapshot?.presence === 'active' ? s.snapshot.worstStage : 0))
-  if (overlay.color === 'posture') return STAGE_COLOR[stage]
+  // a primitive selector: re-renders only when the worst stage changes (-1 = suspended)
+  const stage = useAppStore((s) =>
+    s.snapshot?.presence === 'active' ? (isSuspended(s.snapshot) ? -1 : s.snapshot.worstStage) : 0
+  )
+  if (overlay.color === 'posture') return stage === -1 ? NOT_JUDGED_COLOR : STAGE_COLOR[stage]
   return fixedOverlayColor(overlay)
 }
 
@@ -269,29 +277,8 @@ function StatusChip({
   )
 }
 
-/** Providers that need a saved key (from AI_PRESETS; an unknown kind is assumed to need one). */
-function keyRequired(kind: AiProviderKind): boolean {
-  return AI_PRESETS.find((p) => p.kind === kind)?.keyRequired ?? true
-}
-
-/**
- * A connection the AI will actually call — mirrors `isUsable` in src/main/ai: enabled, a
- * model set, a key saved where the provider needs one, a base URL for custom servers.
- */
-export function isUsableConnection(c: AiConnection): boolean {
-  return (
-    c.enabled &&
-    c.model.trim().length > 0 &&
-    (!keyRequired(c.kind) || c.hasKey) &&
-    (c.kind !== 'openai-compatible' || !!c.baseUrl)
-  )
-}
-
-/** The connections a request would go to, in order (empty while AI is off). */
-export function usableConnections(settings: Pick<Settings, 'ai'> | null): AiConnection[] {
-  if (!settings?.ai.enabled) return []
-  return settings.ai.connections.filter(isUsableConnection)
-}
+// the single usability predicate lives in ai/helpers (re-exported for existing importers)
+export { isUsableConnection, usableConnections }
 
 export const ON_DEVICE_TIP = 'All processing happens on this device. Nothing about you or your posture leaves it unless you turn on an AI model in Settings.'
 
@@ -456,6 +443,7 @@ export default function CameraFeed({ showAway = true, compact = false, overlaySt
   const meshUnavailable = useAppStore((s) => s.meshUnavailable)
   const awayNow = useAppStore((s) => s.snapshot?.presence === 'away')
   const calibrated = useAppStore((s) => !!s.settings?.calibration)
+  const mismatch = useAppStore((s) => s.baselineCameraMismatch)
   const overlayColor = useOverlayColor(overlaySettings)
 
   const chosen = overlayStyle ?? overlaySettings.style
@@ -465,7 +453,8 @@ export default function CameraFeed({ showAway = true, compact = false, overlaySt
   const error = paused ? null : cameraError
   const modelBroken = !paused && !error && detectorError === 'model'
   const live = !paused && !error && !modelBroken
-  const hologram = style === 'hologram' && live
+  // the dim backdrop is its own setting (meshBackdrop), so Lines → Mesh brings it back
+  const hologram = live && (style === 'hologram' || (style === 'mesh' && meshDimsBackdrop(overlaySettings)))
   const showMesh = (style === 'mesh' || style === 'hologram') && live
 
   useEffect(() => {
@@ -556,9 +545,12 @@ export default function CameraFeed({ showAway = true, compact = false, overlaySt
               <div className="surface-glass max-w-[30rem] rounded-2xl px-6 py-4 text-center" role="status">
                 <p className="type-h3 text-text">Looks like you stepped away</p>
                 <p className="mt-1 type-body text-text-dim">
-                  {calibrated
-                    ? "Monitoring resumes the moment you're back in frame."
-                    : 'Sit in view of the camera, then set up your posture.'}
+                  {!calibrated
+                    ? 'Sit in view of the camera, then set up your posture.'
+                    : mismatch
+                      ? // nothing resumes on its own: the saved posture is for another camera
+                        'Your saved posture is for another camera — sit in view, then redo setup or keep it for this camera.'
+                      : "Monitoring resumes the moment you're back in frame."}
                 </p>
               </div>
             </div>

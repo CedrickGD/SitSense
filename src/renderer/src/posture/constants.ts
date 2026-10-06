@@ -123,6 +123,67 @@ export const SHOULDER_LINE_MIN_M = 0.15
 /** ppm needs at least this many measurable segments */
 export const PPM_MIN_SEGMENTS = 2
 
+// ---- presence plausibility (§2, "a seated user at the screen", see Implementation notes) ----
+/**
+ * Farthest perspective-fit depth (m, at the assumed HFOV) of a seated user's shoulders without
+ * a baseline (setup, an uncalibrated engine). Desk users sit 0.3–1.5 m away; the FOV assumption
+ * scales depth ×0.8–1.45 (55–85° lenses), so a user 1.5 m away lying back reads ≤ ~2.5 m. A
+ * small figure (a print, a poster) is reconstructed at human size and lands several metres
+ * away, and so does a person behind the user: 4 m away reads ≥ 3.1 m through any lens of 52°
+ * or more. The FOV is unknown, so the bound trades the two ends: a lens of 110–120° reads a
+ * user ~1.1–1.5 m away at this depth (Implementation notes, "Limits"); with a baseline the bound
+ * is relative (below).
+ */
+export const PRESENCE_MAX_DEPTH_M = 3.0
+/**
+ * With a baseline of this camera (depth D_b, read through the same lens) the bound is
+ * D_b · RATIO, at least D_b + ADD, at most CAP (presenceMaxDepth): moving back 1 m from a close
+ * seat, or to 2.5× the setup distance, stays the user (the recalibration hint starts at 2×);
+ * a figure or a person farther than that does not, whatever the lens.
+ */
+export const PRESENCE_BASELINE_DEPTH_RATIO = 2.5
+export const PRESENCE_BASELINE_DEPTH_ADD_M = 1.0
+export const PRESENCE_BASELINE_DEPTH_CAP_M = 4.5
+/**
+ * The shoulder→ear (neck) vector — and the hip→shoulder (trunk) vector when a hip is seen — of
+ * a seated user is within this of gravity's up: lying back 50° in the chair with the head
+ * going along, or a deep hunch with the head forward, stays ~15–20° inside it (also with
+ * hallucinated hips, ±12° on the trunk); a body lying flat (90°) or upside down does not.
+ */
+export const PRESENCE_NECK_MAX = 72
+/** the trunk (hip→shoulder, a hip seen) is held to PRESENCE_NECK_MAX too once it is at least this long (m) */
+export const PRESENCE_TRUNK_MIN_M = 0.2
+/**
+ * The shoulder line of a seated user is within this of horizontal (lean, shrug, depth noise
+ * of a predicted far shoulder): used only to rule out a camera pitch, never on its own.
+ */
+export const PRESENCE_SHOULDER_TILT_MAX = 45
+/**
+ * Roll budget: the shoulder-line tilt allowed falls from PRESENCE_SHOULDER_TILT_MAX at a recline
+ * of PRESENCE_ROLL_FULL_UNTIL to PRESENCE_ROLL_AT_NECK_MAX at PRESENCE_NECK_MAX. The recline is
+ * the body axis (trunk, else neck) in the body's sagittal plane, so a sideways lean is not
+ * counted twice. A user leaning 40° sideways is upright in that plane; one lying back 65° keeps
+ * the shoulders level. A figure lying flat on the desk 30–40° off "across", seen through the
+ * pitch that would make it upright enough, is reclined ≥ 50° AND rolled ≥ 30° at once
+ * (Implementation notes).
+ */
+export const PRESENCE_ROLL_FULL_UNTIL = 25
+export const PRESENCE_ROLL_AT_NECK_MAX = 8
+/**
+ * Tracking continuity (engine): while present, a frame that fails only the measured-gravity
+ * uprightness (a stale gravity after the webcam was re-aimed) still counts as the user when the
+ * last GOOD frame is at most this old (s) and the shoulders moved at most this far (m) since.
+ */
+export const PRESENCE_TRACK_GAP_S = 0.5
+export const PRESENCE_TRACK_JUMP_M = 0.3
+export const PRESENCE_TRACK_TURN_MAX = 40
+/**
+ * The level-camera pitches (deg, + = looking down) a webcam may have when gravity is not
+ * measured: a little beyond the supported −30…65° on both sides.
+ */
+export const PRESENCE_PITCH_MIN = -45
+export const PRESENCE_PITCH_MAX = 75
+
 // ---- AI assessment (§4) ----
 /**
  * Without thigh gravity, camera pitch leaks into sagittal angles as ≈ pitch·cos(yaw);
@@ -131,6 +192,13 @@ export const PPM_MIN_SEGMENTS = 2
 export const SIDE_VIEW_YAW = 75
 /** …and only up to this yaw: from behind the profile the pitch leak grows as |cos yaw| again */
 export const SIDE_VIEW_YAW_MAX = 105
+/**
+ * Hysteresis (deg) of the near-profile verdict in setup: a view is near-profile from
+ * SIDE_VIEW_YAW on, and once holding/capturing stays so down to SIDE_VIEW_YAW − this (the final
+ * exam of that capture too). A camera whose noisy optical yaw hovers at the limit would otherwise
+ * flip the back check between verified and not, and loop hold → capture → discard.
+ */
+export const SIDE_VIEW_YAW_HYST = 5
 /**
  * Sagittal tolerance multipliers: thigh gravity 1.3 (it assumes level thighs; seated
  * thighs slope ±10–15°, which shifts every absolute sagittal angle one-for-one); a
@@ -199,6 +267,17 @@ export const LEAN_IN_GAZE_REL = -8
  * across faces), so only a look up past that range trips it.
  */
 export const VERIFY_HEAD_ON_TRUNK_MIN = 0
+/**
+ * …raised by this much per degree the absolute trunk reading leans forward (deg/deg). With the
+ * eyes on the screen, headOnTrunk ≈ 14° + the gaze's own pitch − the true trunk lean; a reading
+ * near the forward limit is only confirmed when the head on the trunk agrees with it. A slump
+ * (trunk ~20° forward) on a seat whose knees point down (thigh gravity ~10° off) reads a trunk
+ * of ~10° with the head on the trunk at 0–8°; an upright user (0–5° in) looking at the screen
+ * shows 14–25°. The price: a trunk truly leaning ~10° in with a level gaze is not confirmed
+ * locally either (never coached for it). Only the forward side: a reclined reading keeps the
+ * plain limit.
+ */
+export const VERIFY_HEAD_ON_TRUNK_PER_DEG = 1
 
 // ---- setup session (§7) ----
 export const HOLD_S = 1.5

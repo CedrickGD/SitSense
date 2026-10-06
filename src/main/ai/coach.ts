@@ -3,12 +3,35 @@
 // connections in priority order (falling back on failure, like the posture judge) and
 // returns a cleaned, length-capped markdown-lite reply. Nothing here is ever logged.
 
-import { AI_CHAT_LIMITS, AI_LIMITS, type AiChatContext, type AiChatReply, type AiChatRequest, type AiSettings } from '../../shared/ai'
+import {
+  AI_CHAT_LIMITS,
+  AI_LIMITS,
+  type AiChatContext,
+  type AiChatReply,
+  type AiChatRequest,
+  type AiConnection,
+  type AiSettings
+} from '../../shared/ai'
 import { ISSUE_LABELS, ISSUES, type IssueId, type Stage } from '../../shared/posture'
 import { AiError, safeMessage } from './errors'
 import { abortable, timeoutSignal } from './http'
 import { isUsable, type JudgeDeps } from './judge'
 import { KEY_REQUIRED } from './providers'
+import type { ChatLiveContext } from './validate'
+
+/**
+ * AiChatReply as main produces it (it ran the queue), with the optional fields made definite:
+ * - ok: `connectionId` answered; `fallbackFrom` names the connection that failed first
+ *   (null = the first connection asked answered).
+ * - failed: `fromModel` — every connection was asked and failed (a provider / key /
+ *   model problem worth "check Settings → AI models"); unset for validation, AI off,
+ *   paused and interrupted replies.
+ */
+export type CoachChatReply =
+  | (Extract<AiChatReply, { ok: true }> & { connectionId: string; fallbackFrom: string | null })
+  | Extract<AiChatReply, { ok: false }>
+
+export const CHAT_INTERRUPTED_MESSAGE = 'The coach was interrupted.'
 
 export const CHAT_SYSTEM_PROMPT = [
   'You are the SitSense coach: a friendly, practical ergonomics and posture coach inside SitSense, a Windows app that watches a person\'s sitting posture through their webcam.',
@@ -47,11 +70,16 @@ function issueLines(rec: Partial<Record<IssueId, number>> | undefined, fmt: (id:
 export function buildContextBlock(ctx: AiChatContext | undefined, now = Date.now()): string {
   if (!ctx) return ''
   const out: string[] = []
-  const l = ctx.live
+  const l: ChatLiveContext | undefined = ctx.live
+  const otherCamera = l?.baselineOtherCamera === true
   if (l) {
     const lines: string[] = []
     if (l.presence) lines.push(`at the desk: ${l.presence === 'active' ? 'yes' : 'no (away)'}`)
-    if (l.calibrated !== undefined) lines.push(`posture setup done: ${l.calibrated ? 'yes' : 'no — the user has not saved a reference posture yet'}`)
+    if (otherCamera)
+      lines.push(
+        'posture setup done: yes, but with a different camera than the one in use — posture is not judged and no nudges are shown until the user redoes setup or chooses "Keep it for this camera"'
+      )
+    else if (l.calibrated !== undefined) lines.push(`posture setup done: ${l.calibrated ? 'yes' : 'no — the user has not saved a reference posture yet'}`)
     if (l.view) lines.push(`camera view: ${l.view}`)
     const measures: [string, number | null | undefined][] = [
       ['neck forward angle (ear ahead of shoulder)', l.neckFwdDeg],
@@ -101,6 +129,7 @@ export function buildContextBlock(ctx: AiChatContext | undefined, now = Date.now
       lines.push(`saved ${days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`}`)
     }
     if (b.view) lines.push(`camera view at setup: ${b.view}`)
+    if (otherCamera) lines.push('captured with a different camera than the one in use now')
     if (b.verified !== undefined) lines.push(b.verified ? 'confirmed as good posture' : 'saved without confirmation')
     for (const [name, v] of [
       ['neck forward angle', b.neckFwdDeg],
@@ -150,18 +179,31 @@ export function cleanReply(text: string): string {
   return t
 }
 
-export async function runChat(ai: AiSettings, req: AiChatRequest, deps: JudgeDeps & { now?: () => number }): Promise<AiChatReply> {
+/**
+ * How the fallback note names the connection that failed: its label, or with the model
+ * (or its position) added when the one that answered has the same label.
+ */
+function nameOf(failed: AiConnection, answered: AiConnection, all: readonly AiConnection[]): string {
+  if (failed.label !== answered.label) return failed.label
+  if (failed.model !== answered.model) return `${failed.label} (${failed.model})`
+  return `${failed.label} (#${all.findIndex((c) => c.id === failed.id) + 1})`
+}
+
+export async function runChat(ai: AiSettings, req: AiChatRequest, deps: JudgeDeps & { now?: () => number }): Promise<CoachChatReply> {
   if (!ai.enabled) return { ok: false, message: 'The AI coach is turned off.' }
   const queue = ai.connections.filter(isUsable)
   if (queue.length === 0) return { ok: false, message: 'No connected AI model is ready — add or enable one in Settings → AI models.' }
 
   const system = buildChatSystemPrompt(req, deps.now?.() ?? Date.now())
   const failures: string[] = []
+  // the first connection that was asked (or skipped) and did not answer
+  let firstFailed: AiConnection | null = null
   for (const conn of queue) {
     if (deps.signal?.aborted) break
     const key = deps.getKey(conn.id)
     if (KEY_REQUIRED.has(conn.kind) && !key) {
       failures.push(`${conn.label}: no API key`)
+      firstFailed ??= conn
       continue
     }
     const t = timeoutSignal(deps.timeoutMs ?? AI_LIMITS.timeoutMs, deps.signal)
@@ -172,15 +214,23 @@ export async function runChat(ai: AiSettings, req: AiChatRequest, deps: JudgeDep
       )
       const reply = cleanReply(text)
       if (!reply) throw new AiError('unexpected', 'The model returned an empty answer.')
-      return { ok: true, reply, connectionLabel: conn.label, model: conn.model }
+      return {
+        ok: true,
+        reply,
+        connectionLabel: conn.label,
+        model: conn.model,
+        connectionId: conn.id,
+        fallbackFrom: firstFailed ? nameOf(firstFailed, conn, ai.connections) : null
+      }
     } catch (err) {
-      if (err instanceof AiError && err.code === 'cancelled') return { ok: false, message: 'The coach was interrupted.' }
+      if (err instanceof AiError && err.code === 'cancelled') return { ok: false, message: CHAT_INTERRUPTED_MESSAGE }
       failures.push(`${conn.label}: ${safeMessage(err, key)}`)
+      firstFailed ??= conn
     } finally {
       t.dispose()
     }
   }
-  if (deps.signal?.aborted) return { ok: false, message: 'The coach was interrupted.' }
+  if (deps.signal?.aborted) return { ok: false, message: CHAT_INTERRUPTED_MESSAGE }
   const message = `${queue.length > 1 ? 'All AI connections failed' : 'The coach couldn’t answer'} — ${failures.join(' · ')}`
-  return { ok: false, message: message.length > 400 ? `${message.slice(0, 399)}…` : message }
+  return { ok: false, message: message.length > 400 ? `${message.slice(0, 399)}…` : message, fromModel: true }
 }

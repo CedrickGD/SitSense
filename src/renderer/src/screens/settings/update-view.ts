@@ -1,7 +1,7 @@
 // Settings › About › Updates: what the card says for each update status
 // (src/shared/update.ts). Pure; unit-tested in __tests__/update-view.test.ts.
 
-import type { UpdateStatus } from '@shared/update'
+import type { UpdateMode, UpdateStatus } from '@shared/update'
 import type { IconName } from '@renderer/components/icons'
 import { fmtRelative } from '@renderer/lib/format'
 
@@ -24,7 +24,16 @@ export interface UpdateCardView {
   progress: number | null
 }
 
-export const UPDATE_PRIVACY_NOTE = 'Asks GitHub for the latest version — no posture data is sent.'
+/**
+ * About › Updates › Check automatically: what a check does. An installed copy also
+ * downloads a newer version in the background (src/main/updater.ts autoDownload); a
+ * portable copy only asks. Unknown mode reads as installed (never under-states).
+ */
+export function updatePrivacyNote(mode: UpdateMode | null): string {
+  return mode === 'portable'
+    ? 'Asks GitHub for the latest version — no posture data is sent.'
+    : 'Asks GitHub for the latest version and downloads new versions in the background — no posture data is sent.'
+}
 
 /** "v0.2.0" for the sidebar footer ('' while unknown). */
 export function shortVersion(v: string | null | undefined): string {

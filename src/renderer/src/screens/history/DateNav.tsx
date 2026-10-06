@@ -176,6 +176,8 @@ function MiniCalendar({
                     aria-label={`${fmtDate(k)}${tracked ? `, ${pct === null ? 'a little tracked' : `${pct}% aligned`}` : ', nothing tracked'}`}
                     aria-current={k === today ? 'date' : undefined}
                     aria-pressed={selected || weekSelected}
+                    // opening the picker focuses the shown day (Popover's focusWhenReady), not the first button
+                    data-autofocus={(selected || (weekSelected && k === keys[0])) && !disabled ? true : undefined}
                     className={`relative flex h-9 flex-col items-center justify-center rounded-[10px] font-mono text-[12px] tabular-nums transition-colors duration-150 disabled:cursor-default disabled:opacity-35 ${focusRing('card-2')} ${
                       selected ? 'bg-sage-soft text-sage ring-1 ring-sage/50' : 'text-text-dim enabled:hover:bg-white/[0.06] enabled:hover:text-text'
                     } ${k === today ? 'font-semibold text-text' : ''}`}

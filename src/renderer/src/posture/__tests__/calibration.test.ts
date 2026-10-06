@@ -77,7 +77,11 @@ describe('SetupSession — happy path', () => {
     const coaching = states.filter((s) => s.phase === 'coaching')
     expect(coaching.length).toBeGreaterThan(10)
     expect(coaching[coaching.length - 1].instruction).toBe(INSTRUCTIONS.headForward)
-    expect(coaching[coaching.length - 1].assessment.primary?.id).toBe('headOverShoulders')
+    // past the ergonomic limit: coached ('adjust'), or — within the thigh-slope allowance of the
+    // thigh gravity — not confirmed ('unknown', with the same instruction); never good
+    const head = coaching[coaching.length - 1].assessment.byId.headOverShoulders
+    expect(head.status).not.toBe('good')
+    expect(head.status === 'adjust' ? head.instruction : head.viewInstruction).toBe(INSTRUCTIONS.headForward)
     expect(states[states.length - 1].phase).toBe('done')
   })
 })
