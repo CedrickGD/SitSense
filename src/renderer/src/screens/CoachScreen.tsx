@@ -42,6 +42,11 @@ function useOnline(): boolean {
   return online
 }
 
+/** Keeps a hyphenated word ("On-device") from breaking at its hyphen across two lines. */
+function NoWrap({ children }: { children: string }): JSX.Element {
+  return <span className="whitespace-nowrap">{children}</span>
+}
+
 /** A slim notice strip at the top of the chat card. */
 function Strip({ icon, children, action }: { icon: 'info' | 'pause'; children: string; action?: JSX.Element }): JSX.Element {
   return (
@@ -161,7 +166,12 @@ export default function CoachScreen(): JSX.Element {
       <EmptyState
         icon={<CoachIllustration />}
         headline="Your AI model is turned off"
-        body="Turn it on to ask your coach about your posture, your desk or a stretch. On-device posture tracking keeps working either way."
+        body={
+          <>
+            Turn it on to ask your coach about your posture, your desk or a stretch. <NoWrap>On-device</NoWrap> posture tracking
+            keeps working either way.
+          </>
+        }
         primary={
           <Button
             variant="primary"
@@ -188,7 +198,12 @@ export default function CoachScreen(): JSX.Element {
       <EmptyState
         icon={<CoachIllustration />}
         headline="Your coach needs an AI model"
-        body="Connect your own AI model — Gemini, OpenAI, Anthropic, OpenRouter, or a local one like Ollama. On-device posture tracking keeps working without it."
+        body={
+          <>
+            Connect your own AI model — Gemini, OpenAI, Anthropic, OpenRouter, or a local one like Ollama.{' '}
+            <NoWrap>On-device</NoWrap> posture tracking keeps working without it.
+          </>
+        }
         primary={
           <Button variant="primary" size="lg" icon="plus" onClick={() => openSettings('ai')}>
             Connect a model
@@ -239,7 +254,9 @@ export default function CoachScreen(): JSX.Element {
 
   const showPanel = wide && !!settings
   return (
-    <div className="mx-auto flex h-full min-h-0 w-full max-w-[1056px] gap-4">
+    // left-aligned like every screen (§2.3): on a wide window the spare width stays at the
+    // right, so the chat card lines up with the page title instead of floating mid-window
+    <div className="flex h-full min-h-0 w-full max-w-[1056px] gap-4">
       {topBar}
       <Card flush aria-label="Coach chat" className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {body}

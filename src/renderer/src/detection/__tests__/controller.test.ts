@@ -10,7 +10,8 @@ import { GOOD_SEATED, PoseSim, type CameraParams, type PostureParams } from '@re
 
 const fakes = vi.hoisted(() => ({
   loops: [] as Array<{ fps: number; onFrame: () => void | Promise<void>; stopped: boolean }>,
-  frame: null as PoseFrame | null,
+  /** the poses the fake model returns (one, several, or none) */
+  frames: [] as PoseFrame[],
   openCamera: vi.fn()
 }))
 
@@ -23,8 +24,8 @@ vi.mock('../landmarker', () => ({
   createLandmarker: vi.fn(async () => ({
     landmarker: {
       detectForVideo: () => ({
-        landmarks: fakes.frame ? [fakes.frame.image] : [],
-        worldLandmarks: fakes.frame?.world ? [fakes.frame.world] : [],
+        landmarks: fakes.frames.map((f) => f.image),
+        worldLandmarks: fakes.frames.map((f) => f.world ?? []),
         close: () => undefined
       }),
       setOptions: async () => undefined,
@@ -119,7 +120,7 @@ async function boot(opts: { paused?: boolean; settings?: Partial<Settings> } = {
   fakes.openCamera.mockReset()
   fakes.openCamera.mockResolvedValue({ stream, deviceId: 'cam-1', label: 'Cam', fellBack: false })
   fakes.loops.length = 0
-  fakes.frame = null
+  fakes.frames = []
 
   const { detectionController } = await import('../controller')
   const { useAppStore } = await import('@renderer/state/store')
@@ -127,9 +128,9 @@ async function boot(opts: { paused?: boolean; settings?: Partial<Settings> } = {
   const copy = await import('@renderer/screens/setup/copy')
   await detectionController.init()
   const ctrl = detectionController as unknown as Record<string, unknown>
-  /** one processed frame of `frame` (null = nobody in view), ~66 ms after the last */
-  const tick = async (frame: PoseFrame | null): Promise<void> => {
-    fakes.frame = frame
+  /** one processed frame of `frame` (null = nobody in view; an array = several poses), ~66 ms after the last */
+  const tick = async (frame: PoseFrame | PoseFrame[] | null): Promise<void> => {
+    fakes.frames = frame === null ? [] : Array.isArray(frame) ? frame : [frame]
     vi.advanceTimersByTime(66)
     const loop = fakes.loops[fakes.loops.length - 1]
     if (loop && !loop.stopped) await loop.onFrame()
@@ -258,5 +259,59 @@ describe('step 1 camera check', () => {
     const sim = new NoKnees(FRONT_CAM, { seed: 3 })
     for (let i = 0; i < 30; i++) await tick(sim.render(GOOD))
     expect(setupUi.useSetupProbe.getState()).toMatchObject({ inView: true, hips: 'seen', backCheckable: false, view: 'front' })
+  })
+})
+
+describe('several poses in view (finding: a desk-mat figure hid the user)', () => {
+  const DESK_CAM: CameraParams = { azimuth: 0, elevation: 25, distance: 0.9, roll: 0, hfov: 70, aspect: 16 / 9 }
+
+  it('the user is picked beside a figure lying on the desk, in either order', async () => {
+    const { deskPhantom } = await import('@renderer/posture/__tests__/sim')
+    const fig = deskPhantom(DESK_CAM, { headingDeg: 90, imageV: 0.22 })!
+    const print = new PoseSim(DESK_CAM, { seed: 5, figure: fig })
+    const user = new PoseSim(DESK_CAM, { seed: 6 })
+    const { ctrl, useAppStore, tick } = await boot({ settings: { performancePreset: 'balanced' } })
+    await flush()
+    const engine = ctrl.engine as { presenceState: string; frameReject: string | null }
+    // only the figure: nobody is there
+    for (let i = 0; i < 40; i++) await tick(print.render(GOOD))
+    expect(engine.presenceState).toBe('away')
+    expect(useAppStore.getState().pose).toBeNull()
+    // the user sits down; the model returns the figure first, then the other way round
+    for (let i = 0; i < 40; i++) await tick(i % 2 ? [user.render(GOOD), print.render(GOOD)] : [print.render(GOOD), user.render(GOOD)])
+    expect(engine.presenceState).toBe('active')
+    expect(engine.frameReject).toBeNull()
+    expect(useAppStore.getState().pose).not.toBeNull()
+  })
+})
+
+describe('idle rate while nobody is at the desk', () => {
+  it('drops to 4 fps after 10 s with nobody in view and is back at the preset with the first sight of the user', async () => {
+    const { deskPhantom } = await import('@renderer/posture/__tests__/sim')
+    const { ctrl, tick } = await boot({ settings: { performancePreset: 'balanced' } })
+    await flush()
+    const loop = (): { fps: number } => fakes.loops[fakes.loops.length - 1]
+    expect(loop().fps).toBe(PRESET_FPS.balanced)
+    for (let i = 0; i < 140; i++) await tick(null) // ~9 s
+    expect(loop().fps).toBe(PRESET_FPS.balanced)
+    for (let i = 0; i < 20; i++) await tick(null)
+    expect(loop().fps).toBe(4)
+    // a figure on the desk is nobody: still idle
+    const DESK_CAM: CameraParams = { azimuth: 0, elevation: 25, distance: 0.9, roll: 0, hfov: 70, aspect: 16 / 9 }
+    const print = new PoseSim(DESK_CAM, { seed: 5, figure: deskPhantom(DESK_CAM, { headingDeg: 90, imageV: 0.22 })! })
+    for (let i = 0; i < 5; i++) await tick(print.render(GOOD))
+    expect(loop().fps).toBe(4)
+    // the user appears: full rate at once, before presence confirms them
+    await tick([print.render(GOOD), new PoseSim(DESK_CAM, { seed: 6 }).render(GOOD)])
+    expect((ctrl.engine as { presenceState: string }).presenceState).toBe('away')
+    expect(loop().fps).toBe(PRESET_FPS.balanced)
+  })
+
+  it('never idles with the setup flow on screen', async () => {
+    const { detectionController, tick } = await boot({ settings: { performancePreset: 'balanced' } })
+    await flush()
+    detectionController.startSetup() // step 1, the camera check
+    for (let i = 0; i < 200; i++) await tick(null)
+    expect(fakes.loops[fakes.loops.length - 1].fps).toBe(PRESET_FPS.balanced)
   })
 })

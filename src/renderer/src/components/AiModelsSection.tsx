@@ -23,7 +23,7 @@ import {
 import type { Settings } from '@shared/settings'
 import { useAppStore } from '@renderer/state/store'
 import { Saved, SettingRow, SettingsCard, SettingsGrid, useCommit } from '@renderer/screens/settings/parts'
-import { Button, FIELD_CLASS, IconButton, LinkButton, Menu, Spinner, Toggle, focusRing } from './primitives'
+import { Button, FIELD_CLASS, IconButton, LinkButton, Menu, MetaItem, MetaRow, Spinner, Toggle, focusRing } from './primitives'
 import { Icon, type IconName } from './icons'
 import {
   aiStatus,
@@ -614,19 +614,21 @@ function ConnectionRow(p: RowProps): JSX.Element {
               <span className="shrink-0 rounded-full bg-amber/12 px-2 py-px type-caption text-amber">{problem}</span>
             )}
           </div>
-          <p className="mt-0.5 flex min-w-0 items-center gap-1.5 type-caption text-text-dim">
-            <span className="truncate font-mono">{c.model || 'no model chosen'}</span>
-            {c.label !== preset.label && <span className="shrink-0 text-text-faint">· {preset.label}</span>}
-            <span aria-hidden className="shrink-0 text-text-faint">
-              ·
-            </span>
-            <span
-              aria-hidden
-              title={c.lastTest?.message || undefined}
-              className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[status]}`}
-            />
-            <span className="shrink-0">{statusWord}</span>
-          </p>
+          {/* wraps rather than squeezing the model name (the one fact that matters) to "gemini-3…" */}
+          <MetaRow className="mt-0.5 gap-y-0.5 type-caption text-text-dim">
+            <MetaItem className="font-mono" title={c.model || undefined}>
+              <span className="min-w-0 truncate">{c.model || 'no model chosen'}</span>
+            </MetaItem>
+            {c.label !== preset.label && <MetaItem className="whitespace-nowrap text-text-faint">{preset.label}</MetaItem>}
+            <MetaItem className="gap-1.5 whitespace-nowrap">
+              <span
+                aria-hidden
+                title={c.lastTest?.message || undefined}
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[status]}`}
+              />
+              {statusWord}
+            </MetaItem>
+          </MetaRow>
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {!p.editing && (

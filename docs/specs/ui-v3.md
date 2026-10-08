@@ -199,7 +199,7 @@ The sidebar runs the full window height. The top bar only spans the content colu
      * Not set up: amber dot, "Not set up", button `chevron-right` → `openSetup()`.
      * Set up for another camera (the baseline is not applied, nothing is judged): amber dot, "Nudges off · new camera", button `chevron-right` → Live (its banner offers redo / keep).
      * Priority: paused > camera > not set up > new camera > monitoring.
-  2. **Privacy badge** (32 px row, `caption text-dim`): `shield` icon + "On-device". With a cloud AI enabled it reads "On-device · AI: Gemini" (the connection label, truncated to 14 chars). The tooltip text comes from the existing `aiDisclosure()` / `ON_DEVICE_TIP`. Clicking it opens Settings › Privacy & data.
+  2. **Privacy badge** (32 px row, `caption text-dim`): `shield` icon + "On-device". With a cloud AI enabled it reads "AI: Gemini" with the sage shield (the connection label, truncated to 14 chars; there is no room for "On-device · AI: …" beside the version tag — the tooltip and the accessible label keep the full "On-device · AI: Gemini"). The tooltip text comes from the existing `aiDisclosure()` / `ON_DEVICE_TIP`. Clicking it opens Settings › Privacy & data.
 
 **Compact rail (64 px).** The brand shows only the glyph. Nav items become 44×44 icons with
 the same active treatment; the label moves into a right-side tooltip (e3, 120 ms delay).
@@ -291,7 +291,7 @@ the setup checks during setup):
 
 | Condition | Text | Tooltip |
 |---|---|---|
-| away / no snapshot | `Looking for you…` | "Sit in view of the camera — your head and one shoulder are enough to start." |
+| away / no snapshot | `Looking for you` (narrow chip: `Not in view`; no trailing ellipsis — in a chip that clips, it reads as cut off) | "Sit in view of the camera — your head and one shoulder are enough to start." |
 | `readout.trunkFwd !== null` | `Seeing head, shoulders & hips` | "Full tracking: neck, back angle, side lean and distance are all measured." |
 | `trunkFwd === null && neckFwd !== null` | `Seeing head & shoulders` | "Your hips aren't in view, so your back angle is estimated from how far you sink. Tilt the camera down a little or sit back for full tracking." |
 | `recalibrationSuggested` | `View changed` (amber dot) | "Your camera or seat moved a lot since setup. Readings may be off — redo posture setup." |
@@ -1046,14 +1046,14 @@ ai: { …, useInCoach: true, coachContext: { live: true, today: true, baseline: 
 
 * Nav: `Live` · `Coach` · `History` · `Settings`. Coach badge: `AI`.
 * Monitoring pill: `Monitoring` · `Paused · {m:ss}` · `Paused` · `Camera unavailable` · `Not set up` · `Nudges off · new camera`. Buttons: `Pause` (tooltip "Pause monitoring") · `Resume` · pause menu `15 minutes` / `30 minutes` / `60 minutes` / `Until I resume`.
-* Privacy badge: `On-device` · `On-device · AI: {label}`.
+* Privacy badge: `On-device` · `AI: {label}` (accessible label `On-device · AI: {label}`).
 * Boot: `Starting SitSense…`.
 * Tray menu item: `Redo posture setup` (was `Recalibrate`).
 
 ### 10.2 Live
 
 * Top bar: `Redo posture setup` · `Set up posture`.
-* Tracking chip: `Looking for you…` · `Seeing head, shoulders & hips` · `Seeing head & shoulders` · `View changed` (tooltips in §3.2.1).
+* Tracking chip: `Looking for you` · `Seeing head, shoulders & hips` · `Seeing head & shoulders` · `View changed` (tooltips in §3.2.1).
 * Overlay switcher: `Lines` · `Mesh` · `Off`. Hide button: `Hide preview (monitoring continues)`. Hidden panel: `Preview hidden — SitSense is still watching.` / `Show preview`.
 * Posture card: `POSTURE`; info tooltip `Score 0–100 from how far you are from your saved good posture right now.`; `/100`; `{n} min aligned`; `for {duration}`; chip `Unverified baseline`.
 * Gauges: `Head position` · `Back angle` · `Sitting height` · `Side lean` · `Screen distance`; values `+{n}° forward` · `{n}° back` · `level with baseline` · `{n}° forward` · `{n}° reclined` · `level` · `{n} cm lower` · `{n} cm higher` · `same` · `{n}° to your left` · `{n}° to your right` · `centered` · `{n} cm closer` · `{n} cm farther` · `can't see from here` · `off`; link `Turn on`; tick caption `your setup`.

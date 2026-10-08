@@ -2,7 +2,7 @@
 
 import type { JSX } from 'react'
 import SpineGlyph from '@renderer/components/SpineGlyph'
-import { Button, Tooltip } from '@renderer/components/primitives'
+import { Button, MetaItem, MetaRow, Tooltip } from '@renderer/components/primitives'
 import { Icon } from '@renderer/components/icons'
 import { setupLine } from '@renderer/components/ai-settings'
 import { detectionController } from '@renderer/detection/controller'
@@ -32,24 +32,21 @@ export default function PostureSetupCard(): JSX.Element {
         <div className="flex min-w-0 flex-1 basis-64 flex-col gap-1">
           <p className="type-title text-text">Your good posture</p>
           {line ? (
-            <p className="flex flex-wrap items-center gap-x-1.5 type-body text-text-dim">
-              <Tooltip content={`Saved ${line.when}`}>
-                <span tabIndex={0} className="rounded focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none">
-                  {line.ago}
-                </span>
-              </Tooltip>
-              <span aria-hidden className="text-text-faint">
-                ·
-              </span>
-              <span>{line.view}</span>
-              <span aria-hidden className="text-text-faint">
-                ·
-              </span>
-              <span className={`inline-flex items-center gap-1 ${line.verified ? 'text-sage' : 'text-amber'}`}>
-                <Icon name={line.verified ? 'check' : 'alert'} size={14} />
+            // wraps without a dangling "·" when the column is narrow (MetaRow)
+            <MetaRow className="type-body text-text-dim">
+              <MetaItem className="whitespace-nowrap">
+                <Tooltip content={`Saved ${line.when}`}>
+                  <span tabIndex={0} className="rounded focus-visible:ring-2 focus-visible:ring-sage/70 focus-visible:outline-none">
+                    {line.ago}
+                  </span>
+                </Tooltip>
+              </MetaItem>
+              <MetaItem className="whitespace-nowrap">{line.view}</MetaItem>
+              <MetaItem className={`gap-1 ${line.verified ? 'text-sage' : 'text-amber'}`}>
+                <Icon name={line.verified ? 'check' : 'alert'} size={14} className="shrink-0" />
                 {line.verdict}
-              </span>
-            </p>
+              </MetaItem>
+            </MetaRow>
           ) : (
             <p className="type-body text-text-dim">
               Not set up yet. SitSense coaches you into a good posture and saves it for you — it takes about a minute.

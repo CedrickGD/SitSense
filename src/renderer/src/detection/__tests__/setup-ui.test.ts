@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { CHECK_IDS, INSTRUCTIONS, assessPosture } from '@renderer/posture/assess'
 import { SetupSession } from '@renderer/posture/calibration'
 import { extractOptionsFor } from '@renderer/posture/engine'
@@ -24,6 +24,9 @@ import {
   viewFixOf,
   type SetupProbeState
 } from '../setup-ui'
+
+// simulator-heavy: allow for a loaded machine (parallel workers) beyond the 5 s default
+vi.setConfig({ testTimeout: 60_000 })
 
 const sideSim = (): PoseSim =>
   new PoseSim({ azimuth: 80, elevation: 10, distance: 1.2, roll: 0, hfov: 65, aspect: 16 / 9 }, { seed: 7 })

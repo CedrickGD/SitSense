@@ -4,6 +4,7 @@ import type { Landmark } from '@renderer/posture/types'
 import {
   backAngleText,
   bestGoodStretch,
+  coachThread,
   dismissedForBaseline,
   GAUGE_GATE_COPY,
   distanceText,
@@ -18,10 +19,13 @@ import {
   leanText,
   pickBanner,
   poseTracking,
+  previewText,
   sittingHeightText,
+  sittingToday,
   sittingView,
   statusView,
   trackingLevel,
+  TRACKING_COPY,
   worstIssue,
   type StatusInput
 } from '../liveModel'
@@ -334,5 +338,76 @@ describe('offByIssue', () => {
       { issue: 'headForward', minutes: 1, stage: 2 }
     ])
     expect(offByIssue([])).toEqual([])
+  })
+})
+
+describe('tracking copy', () => {
+  it('never ends in an ellipsis (in a chip that clips, it reads as truncated)', () => {
+    for (const c of Object.values(TRACKING_COPY)) {
+      expect(c.text).not.toMatch(/(…|\.\.\.)$/)
+      expect(c.short).not.toMatch(/(…|\.\.\.)$/)
+    }
+  })
+})
+
+describe('previewText', () => {
+  it('keeps list items and paragraphs on their own lines', () => {
+    const md = 'Try **this**:\n\n1. Chin tucks\n2) Shoulder rolls\n- Stand _up_\n* Sit `back`\n\n> Breathe out.'
+    expect(previewText(md)).toBe('Try this:\n1. Chin tucks\n2. Shoulder rolls\n• Stand up\n• Sit back\nBreathe out.')
+  })
+  it('drops heading markers, rules, code blocks and blank lines', () => {
+    expect(previewText('## Tips\n---\n```\ncode\n```\nDone')).toBe('Tips\nDone')
+    expect(previewText('  \n\n')).toBe('')
+  })
+})
+
+describe('coachThread', () => {
+  const msgs = [
+    { role: 'user', kind: 'text', text: 'First?' },
+    { role: 'assistant', kind: 'text', text: 'One\n- two' },
+    { role: 'system', kind: 'note', text: 'Measurements updated' },
+    { role: 'user', kind: 'check', text: 'Checked my posture' },
+    { role: 'assistant', kind: 'check', text: '', review: { summary: 'Looks good.' } },
+    { role: 'user', kind: 'text', text: 'And now?' },
+    { role: 'assistant', kind: 'text', text: 'Sit **back**.\n1. Hips back' },
+    { role: 'assistant', kind: 'error', text: 'Could not reach Gemini' }
+  ]
+  it('returns the last exchange with structured text and the rows before it', () => {
+    expect(coachThread(msgs, false, 3)).toEqual({
+      question: 'And now?',
+      answer: 'Sit back.\n1. Hips back',
+      earlier: [
+        { role: 'assistant', text: 'One\n• two' },
+        { role: 'user', text: 'Checked my posture' },
+        { role: 'assistant', text: 'Looks good.' }
+      ]
+    })
+    expect(coachThread(msgs, false, 0).earlier).toEqual([])
+  })
+  it('while pending: the question just asked, earlier rows before it', () => {
+    const t = coachThread([...msgs, { role: 'user', kind: 'text', text: 'Why?' }], true, 1)
+    expect(t).toEqual({ question: 'Why?', answer: null, earlier: [{ role: 'assistant', text: 'Sit back.\n1. Hips back' }] })
+  })
+  it('an answer without a question before it; junk input', () => {
+    expect(coachThread([{ role: 'assistant', kind: 'text', text: 'Hi' }], false, 4)).toEqual({ question: null, answer: 'Hi', earlier: [] })
+    expect(coachThread('nope', false, 4)).toEqual({ question: null, answer: null, earlier: [] })
+  })
+})
+
+describe('sittingToday', () => {
+  it('sums active minutes and finds the longest stretch between breaks', () => {
+    const mins: StatMinute[] = []
+    for (let m = 100; m < 130; m++) mins.push({ m, s: m % 7 === 0 ? 'sink:1' : 'good' })
+    // a 1-minute absence does not end the stretch; 5 minutes away is a break
+    mins.push({ m: 130, s: 'away' })
+    for (let m = 131; m < 140; m++) mins.push({ m, s: 'good' })
+    for (let m = 140; m < 145; m++) mins.push({ m, s: 'away' })
+    for (let m = 145; m < 150; m++) mins.push({ m, s: 'good' })
+    expect(sittingToday(mins)).toEqual({ satMinutes: 44, longestMinutes: 40 })
+  })
+  it('is zero without data', () => {
+    expect(sittingToday([])).toEqual({ satMinutes: 0, longestMinutes: 0 })
+    expect(sittingToday(null)).toEqual({ satMinutes: 0, longestMinutes: 0 })
+    expect(sittingToday([{ m: 1, s: 'away' }])).toEqual({ satMinutes: 0, longestMinutes: 0 })
   })
 })

@@ -59,7 +59,8 @@ function StatusZone({ ringSize }: { ringSize: number }): JSX.Element {
     const streak = minutes ? goodStreakMinutes(minutes, Math.floor(Date.now() / 60_000)) : 0
     sub = <span className="type-value text-text-dim">{streak > 0 ? `${fmtMinutes(streak)} aligned` : 'aligned with your setup'}</span>
   } else if (STATUS_SUB[view.kind]) {
-    sub = <span className="type-caption text-text-dim">{STATUS_SUB[view.kind]}</span>
+    // pretty: no lone word ("first.") on a second line
+    sub = <span className="type-caption text-pretty text-text-dim">{STATUS_SUB[view.kind]}</span>
   }
 
   return (

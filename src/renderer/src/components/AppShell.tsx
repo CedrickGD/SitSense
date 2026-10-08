@@ -334,18 +334,29 @@ function MonitoringPill({ compact }: { compact: boolean }): JSX.Element {
     action = <IconButton icon="chevron-right" label="Set up posture" size={28} ringOn="card" onClick={() => openSetup()} />
   }
 
+  // "Nudges off · new camera" doesn't fit one line of the 220 px sidebar: the consequence
+  // on top, the reason as a caption under it (the pill is 44 px, room for both)
+  const twoLine = state === 'mismatch'
   return (
     <div className="surface-card flex h-11 items-center gap-2.5 rounded-xl pr-2 pl-3" role="status" aria-live="polite">
       <StatusDot color={dot} pulse={state === 'monitoring'} />
-      <span className="min-w-0 flex-1 truncate type-body text-text">
-        {state === 'paused' && m.resumeAt ? (
-          <>
-            Paused <span className="text-text-faint">·</span> <span className="type-value text-text-dim">{fmtCountdown(m.resumeAt - now)}</span>
-          </>
-        ) : (
-          label
-        )}
-      </span>
+      {twoLine ? (
+        <span className="flex min-w-0 flex-1 flex-col" title={label}>
+          <span className="truncate type-body text-text">Nudges off</span>
+          <span className="truncate type-caption text-text-dim">New camera</span>
+        </span>
+      ) : (
+        // "Camera unavailable" fits with ~3 px to spare: the title covers a font that renders wider
+        <span className="min-w-0 flex-1 truncate type-body text-text" title={state === 'monitoring' ? undefined : label}>
+          {state === 'paused' && m.resumeAt ? (
+            <>
+              Paused <span className="text-text-faint">·</span> <span className="type-value text-text-dim">{fmtCountdown(m.resumeAt - now)}</span>
+            </>
+          ) : (
+            label
+          )}
+        </span>
+      )}
       {action}
     </div>
   )
@@ -358,6 +369,9 @@ function PrivacyBadge({ compact }: { compact: boolean }): JSX.Element {
   const { ai, tip } = privacyNotice(settings)
   const aiLabel = ai ? (ai.label.length > 14 ? `${ai.label.slice(0, 13)}…` : ai.label) : null
   const text = aiLabel ? `On-device · AI: ${aiLabel}` : 'On-device'
+  // next to the version tag there is no room for "On-device · AI: …": with a model connected
+  // the badge names it (sage shield), and the tooltip keeps the full disclosure
+  const shown = aiLabel ? `AI: ${aiLabel}` : 'On-device'
   return (
     <Tooltip content={tip} placement={compact ? 'right' : 'top'} align={compact ? 'center' : 'start'}>
       <button
@@ -369,7 +383,7 @@ function PrivacyBadge({ compact }: { compact: boolean }): JSX.Element {
         }`}
       >
         <Icon name="shield" size={16} className={ai ? 'text-sage' : 'text-text-faint'} />
-        {!compact && <span className="truncate type-caption">{text}</span>}
+        {!compact && <span className="truncate type-caption">{shown}</span>}
       </button>
     </Tooltip>
   )

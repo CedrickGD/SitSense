@@ -1,6 +1,6 @@
 {
   "name": "sitsense",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local AI posture monitor — nudges you before the slouch settles in.",
   "main": "./out/main/index.js",
   "author": "CedrickGD",

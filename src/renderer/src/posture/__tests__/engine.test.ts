@@ -167,6 +167,28 @@ describe('PostureEngine — presence', () => {
     expect(back.snapshot.presence).toBe('active')
   })
 
+  it('a user the model drops every other frame (poor light) is still confirmed; a rare sighting is not', () => {
+    const { engine, sim, t0 } = setup()
+    runEngine(engine, sim, null, t0, t0 + 3000)
+    expect(engine.presenceState).toBe('away')
+    /** frames every STEP_MS from `from`, the user seen where `seen(i)`; returns when presence went active */
+    const flicker = (from: number, ms: number, seen: (i: number) => boolean): number | null => {
+      for (let i = 0, t = from; t < from + ms; i++, t += STEP_MS) {
+        engine.processFrame(seen(i) ? sim.render(good) : null, t)
+        if (engine.presenceState === 'active') return t - from
+      }
+      return null
+    }
+    // seen in 3 of every 5 frames (the real dim-room recordings: 50–65%): confirmed within ~4 s
+    const at = flicker(t0 + 3000, 10_000, (i) => i % 5 < 3)
+    expect(at).not.toBeNull()
+    expect(at!).toBeLessThan(5000)
+    // gone again, then seen in only 1 of every 4 frames: never confirmed
+    runEngine(engine, sim, null, t0 + 20_000, t0 + 23_000)
+    expect(engine.presenceState).toBe('away')
+    expect(flicker(t0 + 23_000, 30_000, (i) => i % 4 === 0)).toBeNull()
+  })
+
   it('a long break resets running episodes (no alert right after returning)', () => {
     const { engine, sim, t0 } = setup()
     const bad = posture({ neckFlex: 25, headPitch: -25 })

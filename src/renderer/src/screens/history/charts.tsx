@@ -452,12 +452,13 @@ function StackedBar({ stages, max }: { stages: StageMinutes; max: number }): JSX
 export function IssueBars({ rows }: { rows: IssueRow[] }): JSX.Element {
   const max = Math.max(0, ...rows.map((r) => r.total))
   return (
-    <ul className="flex flex-col gap-3">
+    // rows share a taller card's height (36 → 56 px each) instead of bunching at the top
+    <ul className="flex flex-1 flex-col">
       {rows.map((r) => {
         const zero = r.total === 0
         const split = stageSplitText(r.stages)
         return (
-          <li key={r.issue} className="grid grid-cols-[112px_minmax(0,1fr)_64px] items-center gap-3">
+          <li key={r.issue} className="grid max-h-14 min-h-9 flex-1 grid-cols-[112px_minmax(0,1fr)_64px] items-center gap-3">
             <span className={`truncate type-body ${zero ? 'text-text-faint' : 'text-text'}`}>{ISSUE_SHORT[r.issue]}</span>
             <Tooltip content={zero ? null : split} delay={120}>
               <span

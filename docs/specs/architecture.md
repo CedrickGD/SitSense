@@ -216,7 +216,7 @@ const fileset = await FilesetResolver.forVisionTasks('/mediapipe/wasm'); // base
 const landmarker = await PoseLandmarker.createFromOptions(fileset, {
   baseOptions: { modelAssetPath: '/models/pose_landmarker_lite.task', delegate: 'GPU' },
   runningMode: 'VIDEO',
-  numPoses: 1,
+  numPoses: 2, // the user plus one more: see detection.md §2, "Several poses in view"
 });
 const result = landmarker.detectForVideo(videoEl, performance.now()); // ts must be monotonic
 ```

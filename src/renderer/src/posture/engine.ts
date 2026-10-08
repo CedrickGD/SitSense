@@ -20,6 +20,7 @@ import {
 } from '@shared/posture'
 import {
   AWAY_ENTER_S,
+  AWAY_EXIT_DECAY,
   AWAY_EXIT_S,
   AWAY_FULL_RESET_S,
   DT_CAP_S,
@@ -329,6 +330,11 @@ export class PostureEngine {
    */
   get frameReject(): FrameReject | null {
     return this.reject
+  }
+
+  /** The options frames are measured with: the baseline's (extractOptionsFor), none uncalibrated. */
+  get extractOptions(): ExtractOptions {
+    return this.baseline ? extractOptionsFor(this.baseline) : {}
   }
 
   /** Whether each issue had measurable data on the last processed frame. */
@@ -663,7 +669,8 @@ export class PostureEngine {
         if (awayDurMs > AWAY_FULL_RESET_S * 1000) for (const issue of ISSUES) this.machines[issue].reset(true)
       }
     } else {
-      this.goodMs = 0
+      // detection flickers in poor light: a gap takes back part of the GOOD time, not all of it
+      this.goodMs = Math.max(0, this.goodMs - dtMs * AWAY_EXIT_DECAY)
     }
   }
 

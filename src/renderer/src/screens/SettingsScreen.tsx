@@ -4,7 +4,7 @@
 // with less room it becomes a scrollable chip row above the content (measured, not guessed
 // from the window width — the app shell's own panels take a varying share).
 
-import { useEffect, useLayoutEffect, useRef, useState, type JSX, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type JSX, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import AiModelsSection from '@renderer/components/AiModelsSection'
 import { Icon } from '@renderer/components/icons'
 import { NavListItem, focusRing } from '@renderer/components/primitives'
@@ -81,6 +81,15 @@ function CategoryChips({
   onSelect: (c: SettingsCategoryId) => void
 }): JSX.Element {
   const rowRef = useRef<HTMLDivElement>(null)
+  // which ends have chips scrolled out of view: those edges fade, the others stay crisp
+  const [edges, setEdges] = useState({ start: false, end: true })
+  const readEdges = useCallback((): void => {
+    const row = rowRef.current
+    if (!row) return
+    const start = row.scrollLeft > 2
+    const end = row.scrollLeft + row.clientWidth < row.scrollWidth - 2
+    setEdges((e) => (e.start === start && e.end === end ? e : { start, end }))
+  }, [])
   // keep the selected chip in view (deep links, keyboard) without scrolling the page
   useEffect(() => {
     const row = rowRef.current
@@ -91,16 +100,23 @@ function CategoryChips({
     const right = left + chip.offsetWidth
     if (left < row.scrollLeft + 4) row.scrollTo({ left: Math.max(0, left - 16) })
     else if (right > row.scrollLeft + row.clientWidth - 40) row.scrollTo({ left: right - row.clientWidth + 48 })
-  }, [current])
+    readEdges()
+  }, [current, readEdges])
+  useEffect(() => {
+    const row = rowRef.current
+    if (!row || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(readEdges)
+    ro.observe(row)
+    return () => ro.disconnect()
+  }, [readEdges])
+  const mask = `linear-gradient(to right, ${edges.start ? 'transparent, black 32px' : 'black'}, ${edges.end ? 'black calc(100% - 40px), transparent' : 'black'})`
   return (
     <nav aria-label="Settings categories" className="-mx-1 mb-5">
       <div
         ref={rowRef}
+        onScroll={readEdges}
         className="relative flex gap-1.5 overflow-x-auto py-1 pr-10 pl-1"
-        style={{
-          scrollbarWidth: 'none',
-          maskImage: 'linear-gradient(to right, black calc(100% - 40px), transparent)'
-        }}
+        style={{ scrollbarWidth: 'none', maskImage: mask }}
       >
         {SETTINGS_CATEGORIES.map((c) => {
           const meta = CATEGORY_META[c]

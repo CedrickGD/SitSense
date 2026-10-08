@@ -75,6 +75,24 @@ notes, "Presence plausibility"). `frameReject(frame)` / `engine.frameReject` /
 `SetupState.frameReject` say why a frame is BAD: `'no-pose' | 'not-in-view' | 'too-far' |
 'not-upright'`; the last two mean "not you".
 
+**Several poses in view** (`select.ts`). The pose model runs with room for two poses. With
+room for one, MediaPipe tracks the first pose it finds and stops running its detector while it
+holds it: a figure on the desk mat picked up while the chair was empty kept the model busy, and
+the user who sat down in front of it was never found. With room for two, the detector keeps
+looking while fewer than two poses are tracked. `pickUser(frames, engine.extractOptions,
+prev)` then picks the user. A pose that passes `frameReject` beats one only partly in view,
+which beats one that is "not you". Among equals, the pose whose shoulder midpoint lies within
+`PICK_FOLLOW_MAX` (0.25 image heights) of the last pick (the last 1.5 s) wins, so two plausible
+people never make the readings jump between them; otherwise the larger (nearer) pose wins.
+Plausibility is never overridden by following: a figure that lies where the user just was does
+not keep the pick. Only the picked pose reaches the engine, the setup session and the overlay.
+
+**Idle rate.** After 10 s with presence `away` and no pose that could be the user, the
+controller runs the model at 4 fps (at most the preset rate) and returns to the preset rate on
+the first frame that shows a pose that could be the user, before presence even confirms it
+(`AWAY_EXIT_S` is time-based, so confirming takes the same 1.5 s either way). Never while the
+setup flow is open.
+
 ## 3. Per-frame geometry (`features.ts`, pure)
 
 `extractFeatures(frame, opts?: { up?: Vec3 }) → PostureFeatures | null` (null for BAD frames).
@@ -535,7 +553,13 @@ Presence ACTIVE/AWAY (enter 2.0 s, exit 1.5 s, full reset after 30 s away). The 
 starts AWAY: nobody counts as present — sitting, judged — until 1.5 s of real landmarks
 (an app launched at login must not open a sitting stretch for an empty chair). A gap
 without frames longer than the full reset (pause, sleep, camera restart) also returns to
-AWAY until the person is confirmed again. Per issue: IDLE → PENDING → ALERTED → RECOVERING → COOLDOWN with dwell, cooldown, escalation,
+AWAY until the person is confirmed again. The 1.5 s need not be unbroken: while AWAY a BAD
+frame takes back half its time (`AWAY_EXIT_DECAY`) instead of starting over. In a dim room, with
+the head down over a phone, the model returned nothing in 30–50% of the frames of a user
+sitting right there (real recordings); with a restart on every gap they were confirmed in
+0–17% of the time, with the decay in 62–97%. A user seen in 60% of the frames is confirmed
+after ~3.8 s; below a third of the frames the GOOD time drifts back down, so a figure that
+slips through now and then is never confirmed. Per issue: IDLE → PENDING → ALERTED → RECOVERING → COOLDOWN with dwell, cooldown, escalation,
 band-hold and data-loss reset (see `episodeMachine.ts` and `constants.ts`; long gaps,
 cooldown arming and quiet-period escalation: Implementation notes). There is no reminder:
 the machine never emits `kind: 'reminder'` (the shared `AlertKind` keeps the value for
@@ -640,7 +664,7 @@ MediaPipe-shaped output. It is the main test harness for "works from any angle".
 | `FORCE_AFTER_S` | 20 s | setup min GOOD frames | 15 |
 | `τ_metric` / `τ_scale` | 0.6 / 1.0 s | `HYST` | 0.75 |
 | outlier jump / max consec | 0.35 / 3 | `DT_CAP` | 0.5 s |
-| `AWAY_ENTER/EXIT/FULL_RESET` | 2.0 / 1.5 / 30 s | `RECAL_D_MIN/MAX`, `RECAL_SUGGEST_S` | 0.5 / 1.8, 10 s |
+| `AWAY_ENTER/EXIT/FULL_RESET`, `AWAY_EXIT_DECAY` | 2.0 / 1.5 / 30 s, 0.5 | `RECAL_D_MIN/MAX`, `RECAL_SUGGEST_S` | 0.5 / 1.8, 10 s |
 | sink stages | trunkFwd 10/18/28°, drop 5/10/16 cm, torso 0.07/0.12/0.18, recline 20/28/36° (v3; `RECLINE_CRANE_GAIN` 1.5) | headForward | neck 10/18/28°, neckDrop 0.15/0.28/0.42, pitch 15/25/35° |
 | near profile | `SIDE_VIEW_YAW` 75–105°, setup hysteresis `SIDE_VIEW_YAW_HYST` 5° | forward-trunk corroboration | `VERIFY_HEAD_ON_TRUNK_PER_DEG` 1°/° |
 | v3 judge | recline limit −25° (lying below −32°); lying: neckOnTrunk > 12°, and headOnTrunk > 36° with a known trunk < −18°, else > 48°; leaning in: headOnTrunk < −8°; corroboration: headOnTrunk ≥ 0° | v3 setup | `UNVERIFIED_FORCE_AFTER_S` 3 s, `ASSESS_RELATIVE_WINDOW_S` 2 s, `HIP_TWIST_HYST` ±3° |

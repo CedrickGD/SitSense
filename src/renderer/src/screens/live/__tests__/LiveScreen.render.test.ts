@@ -115,6 +115,20 @@ describe('LiveScreen', () => {
     expect(html).toContain('2 breaks today')
   })
 
+  it('nothing tracked yet: Today shows a proper empty state', () => {
+    expect(render()).toContain('Nothing tracked yet today')
+    expect(render({ snapshot: null }, { calibration: null })).toContain('Your day fills in here once your posture is set up.')
+  })
+
+  it('the coach preview keeps the reply’s lines (a list is not one run-on sentence)', () => {
+    const conn = { id: 'c1', kind: 'openai-compatible', label: 'Local', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', enabled: true, hasKey: false, keyHint: null, lastTest: null }
+    const html = render(
+      { coachMessages: [{ role: 'user', kind: 'text', text: 'A stretch?' }, { role: 'assistant', kind: 'text', text: 'Try this:\n\n1. Chin tucks\n- Shoulder **rolls**' }] },
+      { ai: { ...DEFAULT_SETTINGS.ai, enabled: true, connections: [conn] } }
+    )
+    expect(html).toContain('Try this:\n1. Chin tucks\n• Shoulder rolls')
+  })
+
   it('an active issue shows its stage and duration', () => {
     const html = render({ snapshot: snapshot({ headForward: 2 }) })
     expect(html).toContain('Head forward')

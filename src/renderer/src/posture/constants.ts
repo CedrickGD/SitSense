@@ -401,6 +401,15 @@ export const REC_DWELL_S = 5
 // ---- presence ----
 export const AWAY_ENTER_S = 2.0
 export const AWAY_EXIT_S = 1.5
+/**
+ * While away, a BAD frame takes back this fraction of its time from the GOOD time gathered
+ * toward AWAY_EXIT_S instead of starting over. In poor light (a dim room, the head down over a
+ * phone) the model drops every second or third frame of a user who sits right there; with a
+ * restart on every gap they were never confirmed. With 0.5 a user seen in 60% of the frames is
+ * confirmed after ~3.8 s; below a third of the frames the GOOD time drifts back down (a figure
+ * that slips through now and then is never confirmed).
+ */
+export const AWAY_EXIT_DECAY = 0.5
 export const AWAY_FULL_RESET_S = 30
 
 // ---- recalibration hint ----

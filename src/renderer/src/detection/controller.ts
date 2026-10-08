@@ -14,6 +14,7 @@ import { BodyMeshBuilder, type BodyMesh, type FaceInput } from '@renderer/overla
 import { assessPosture } from '@renderer/posture/assess'
 import { SetupSession, medianFeatures, type SetupPhase, type SetupState } from '@renderer/posture/calibration'
 import { PostureEngine, baselineNeckLatRef, type EngineSettings } from '@renderer/posture/engine'
+import { pickUser, posePoint, type PosePoint } from '@renderer/posture/select'
 import type { Frame, PoseFrame, PostureFeatures } from '@renderer/posture/types'
 import {
   IDLE_AI_CHECK,
@@ -50,6 +51,11 @@ const UI_SNAPSHOT_INTERVAL_MS = 1000
 /** the Lines overlay data is published at most this often (≤ 15 Hz) */
 const POSE_MIN_INTERVAL_MS = 1000 / 15 - 4
 const FPS_WINDOW_MS = 2000
+/** nobody in view for this long: the model looks for the user at IDLE_FPS (saves CPU and battery) */
+const IDLE_AFTER_MS = 10_000
+const IDLE_FPS = 4
+/** the last picked pose is followed for this long when several poses are in view */
+const PICK_FOLLOW_MS = 1500
 const RETRY_BASE_MS = 2000
 const RETRY_MAX_MS = 30000
 /** model failures retry slowly (they no longer touch the camera, but cost CPU) */
@@ -174,6 +180,11 @@ class DetectionController {
   private faceGen = 0
   /** how long the last frame took, all models included */
   private frameCostMs = 0
+  /** since when nobody (no pose that could be the user) is in view while away; inference idles */
+  private awaySince: number | null = null
+  private idle = false
+  /** where the last picked pose was (several poses in view: the user is followed) */
+  private userAt: { p: PosePoint; t: number } | null = null
 
   // ---- camera / start lifecycle ----
   private starting = false
@@ -394,7 +405,9 @@ class DetectionController {
       if (!gotFrame) throw new CameraOpenError('in-use')
       void this.refreshCameraList()
 
-      // 4. the loop
+      // 4. the loop (a fresh capture starts at the full rate)
+      this.awaySince = null
+      this.idle = false
       const fps = this.targetFps()
       this.loop = new FrameLoop(video, fps, () => this.processFrame(), { onStall: () => this.onLoopStall() })
       this.loop.start()
@@ -1015,14 +1028,18 @@ class DetectionController {
     let result: PoseLandmarkerResult | null = null
     try {
       result = landmarker.detectForVideo(video, t)
-      const image = result.landmarks?.[0]
+      const vw = video.videoWidth
+      const vh = video.videoHeight
+      const aspect = vw > 0 && vh > 0 ? vw / vh : 4 / 3
+      const pick = this.pickPose(result, aspect, engine, t)
+      const image = result.landmarks?.[pick]
       if (image && image.length > 0) {
-        const vw = video.videoWidth
-        const vh = video.videoHeight
-        frame = { image, world: result.worldLandmarks?.[0] ?? null, aspect: vw > 0 && vh > 0 ? vw / vh : 4 / 3 }
+        frame = { image, world: result.worldLandmarks?.[pick] ?? null, aspect }
+        const p = posePoint(frame)
+        if (p) this.userAt = { p, t }
       }
       this.onInferenceOk(t)
-      if (this.masksOn) mesh = this.buildMesh(result, frame, t)
+      if (this.masksOn) mesh = this.buildMesh(result, frame, t, pick)
     } catch (err) {
       await this.onInferenceError(err, t)
       return
@@ -1062,6 +1079,33 @@ class DetectionController {
     const reject = setupLive ? this.lastSetupState?.frameReject : engine.frameReject
     const notUser = reject === 'too-far' || reject === 'not-upright'
     this.publishPose(notUser ? null : frame, overlayFeatures, snapshot, notUser ? null : mesh, t)
+    this.updateIdle(engine, frame !== null && !notUser, t)
+  }
+
+  /**
+   * Index of the user among the poses the model found: with room for two poses, a figure on
+   * the desk mat or a poster can be in the result beside the user (posture/select.ts).
+   */
+  private pickPose(result: PoseLandmarkerResult, aspect: number, engine: PostureEngine, t: number): number {
+    const poses = result.landmarks ?? []
+    if (poses.length <= 1) return 0
+    const frames: PoseFrame[] = poses.map((image, i) => ({ image, world: result.worldLandmarks?.[i] ?? null, aspect }))
+    const prev = this.userAt && t - this.userAt.t <= PICK_FOLLOW_MS ? this.userAt.p : null
+    return pickUser(frames, engine.extractOptions, prev)
+  }
+
+  /**
+   * Nobody at the desk for IDLE_AFTER_MS: the model runs at IDLE_FPS until a pose that could be
+   * the user appears, then at once at the full rate again (before presence even confirms it).
+   */
+  private updateIdle(engine: PostureEngine, someone: boolean, t: number): void {
+    if (engine.presenceState === 'away' && !someone) this.awaySince ??= t
+    else this.awaySince = null
+    const idle = this.awaySince !== null && t - this.awaySince >= IDLE_AFTER_MS
+    if (idle !== this.idle) {
+      this.idle = idle
+      this.applyLoopFps()
+    }
   }
 
   private onInferenceOk(t: number): void {
@@ -1238,8 +1282,8 @@ class DetectionController {
     }
   }
 
-  private buildMesh(result: PoseLandmarkerResult, frame: Frame, t: number): BodyMesh | null {
-    const mask = result.segmentationMasks?.[0]
+  private buildMesh(result: PoseLandmarkerResult, frame: Frame, t: number, pick: number): BodyMesh | null {
+    const mask = result.segmentationMasks?.[pick]
     if (!mask || !frame) {
       this.meshBuilder.reset()
       return null
@@ -1361,10 +1405,14 @@ class DetectionController {
     return PRESET_FPS[this.settings?.performancePreset ?? 'balanced'] ?? PRESET_FPS.balanced
   }
 
-  /** The preset rate, raised to at least 'balanced' while setup runs (enough frames for the capture). */
+  /**
+   * The preset rate, raised to at least 'balanced' while setup runs (enough frames for the
+   * capture), lowered to IDLE_FPS while nobody is at the desk (never with the setup on screen).
+   */
   private targetFps(): number {
     const preset = this.presetFps()
-    return this.setupRunning() ? Math.max(PRESET_FPS.balanced, preset) : preset
+    if (this.setupRunning()) return Math.max(PRESET_FPS.balanced, preset)
+    return this.idle && !this.setupWanted ? Math.min(preset, IDLE_FPS) : preset
   }
 
   private applyLoopFps(): void {

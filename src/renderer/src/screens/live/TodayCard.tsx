@@ -7,6 +7,7 @@ import { useAppStore } from '@renderer/state/store'
 import { DASH, fmtClockMinute, fmtMinutes, plural } from '@renderer/lib/format'
 import { ISSUE_SHORT, STAGE_COLOR, summarizeToday } from '@renderer/lib/ui'
 import { Card, CardHeader, LinkButton, Skeleton } from '@renderer/components/primitives'
+import { Icon } from '@renderer/components/icons'
 import Timeline from './Timeline'
 import { bestGoodStretch, hourTicks, offByIssue, type IssueShare } from './liveModel'
 
@@ -48,6 +49,8 @@ function OffBreakdown({ shares }: { shares: IssueShare[] }): JSX.Element {
 export default function TodayCard({ timelineHeight = 20, room = 0 }: { timelineHeight?: number; room?: number }): JSX.Element {
   const today = useAppStore((s) => s.today)
   const setRoute = useAppStore((s) => s.setRoute)
+  // minutes only count once a baseline exists (History §5.5)
+  const calibrated = useAppStore((s) => !!s.settings?.calibration)
 
   useEffect(() => {
     const load = (): void => {
@@ -91,15 +94,23 @@ export default function TodayCard({ timelineHeight = 20, room = 0 }: { timelineH
   }
 
   if (!summary) {
-    // nothing tracked yet: never claim "100% aligned" on no data (audit)
+    // nothing tracked yet: never claim "100% aligned" on no data (audit). A proper empty
+    // state (§8.6, compact): one centered group — an empty placeholder box read as broken.
     return (
       <Card dense className="flex h-full flex-col" aria-label="Today">
         {header}
-        <div className="flex flex-1 flex-col justify-center gap-3">
-          <div aria-hidden className="h-10 w-full rounded-lg border border-dashed border-hairline-strong/70 bg-white/[0.015]" />
-          <p className="max-w-[52ch] type-body text-text-dim">
-            Your day fills in here once SitSense has watched you sit for a minute.
-          </p>
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-2 pb-1 text-center">
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-card-2 text-text-dim ring-1 ring-white/[0.06]" aria-hidden>
+            <Icon name="history" size={18} />
+          </span>
+          <div className="flex flex-col items-center gap-1">
+            <p className="type-title text-text">Nothing tracked yet today</p>
+            <p className="max-w-[46ch] type-body text-balance text-text-dim">
+              {calibrated
+                ? 'Your day fills in here once SitSense has watched you sit for a minute.'
+                : 'Your day fills in here once your posture is set up.'}
+            </p>
+          </div>
         </div>
       </Card>
     )

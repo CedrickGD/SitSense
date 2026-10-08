@@ -18,6 +18,7 @@ import { isSeen } from '@renderer/detection/pose-geometry'
 import { STAGES } from '@renderer/posture/constants'
 import { fmtMinutes, plural } from '@renderer/lib/format'
 import { isSuspended } from '@renderer/lib/score'
+import { buildTimeline, DEFAULT_BREAK_MINUTES, isActiveState, sittingStretches } from '@renderer/screens/history/history'
 
 const round = (v: number): number => Math.round(Math.abs(v))
 
@@ -280,10 +281,11 @@ export function gaugeModels(
 
 export type TrackingLevel = 'looking' | 'full' | 'upper' | 'changed'
 
+// No trailing "…" on these: in a chip that clips long text, an ellipsis reads as truncation.
 export const TRACKING_COPY: Record<TrackingLevel, { text: string; short: string; tip: string }> = {
   looking: {
-    text: 'Looking for you…',
-    short: 'Looking…',
+    text: 'Looking for you',
+    short: 'Not in view',
     tip: 'Sit in view of the camera — your head and one shoulder are enough to start.'
   },
   full: {
@@ -388,6 +390,21 @@ export function hourTicks(firstMinute: number, lastMinute: number, tzOffsetMin =
 
 // ───────────────────────────── Sitting card (§3.5) ─────────────────────────────
 
+export interface SittingToday {
+  /** active minutes logged today (good + any issue); 0 with no data */
+  satMinutes: number
+  /** longest sitting stretch today in minutes (History's definition, §5.3); 0 with no data */
+  longestMinutes: number
+}
+
+/** Today's sitting totals for the Sitting card's detail rows (a tall card has room for them). */
+export function sittingToday(minutes: readonly StatMinute[] | null | undefined): SittingToday {
+  if (!minutes || minutes.length === 0) return { satMinutes: 0, longestMinutes: 0 }
+  const satMinutes = minutes.filter((m) => isActiveState(m.s)).length
+  const stretches = sittingStretches(buildTimeline(minutes, DEFAULT_BREAK_MINUTES))
+  return { satMinutes, longestMinutes: stretches.length > 0 ? Math.max(...stretches) : 0 }
+}
+
 export interface SittingView {
   /** h2 value, e.g. "38 min"; "—" when no stretch is under way */
   value: string
@@ -484,17 +501,41 @@ function plainText(t: string): string {
     .trim()
 }
 
+/**
+ * markdown-lite → plain text that keeps the reply's shape: one line per paragraph or list
+ * item (`• …`, `1. …`), no blank lines. For previews rendered with `white-space: pre-line`
+ * — flattened into one line, a list reads as a run-on sentence.
+ */
+export function previewText(t: string): string {
+  return t
+    .replace(/```[\s\S]*?```/g, '\n')
+    .split(/\r?\n/)
+    .map((raw) => {
+      let line = raw.trim().replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '')
+      if (/^[-*_]{3,}$/.test(line)) return ''
+      const bullet = /^[-*•]\s+/.exec(line)
+      const numbered = bullet ? null : /^(\d+)[.)]\s+/.exec(line)
+      if (bullet) line = `• ${line.slice(bullet[0].length)}`
+      else if (numbered) line = `${numbered[1]}. ${line.slice(numbered[0].length)}`
+      return line.replace(/[*_`]+/g, '').replace(/\s+/g, ' ').trim()
+    })
+    .filter((line) => line.length > 0 && line !== '•')
+    .join('\n')
+}
+
+type TextFormat = (t: string) => string
+
 /** an assistant row worth previewing (error rows and notes are skipped), as plain text */
-function answerText(m: LooseMessage): string | null {
+function answerText(m: LooseMessage, fmt: TextFormat = plainText): string | null {
   if (!m || m.role !== 'assistant' || m.kind === 'error' || m.kind === 'note') return null
   const summary = m.kind === 'check' && typeof m.review?.summary === 'string' ? m.review.summary : null
-  const plain = plainText(summary ?? (typeof m.text === 'string' ? m.text : ''))
+  const plain = fmt(summary ?? (typeof m.text === 'string' ? m.text : ''))
   return plain || null
 }
 
-function questionText(m: LooseMessage): string | null {
+function questionText(m: LooseMessage, fmt: TextFormat = plainText): string | null {
   if (!m || m.role !== 'user' || typeof m.text !== 'string') return null
-  return plainText(m.text) || null
+  return fmt(m.text) || null
 }
 
 /**
@@ -518,31 +559,68 @@ export interface CoachExchange {
   answer: string | null
 }
 
+/** One earlier row of the conversation, as preview text. */
+export interface PeekMessage {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+export interface CoachThread extends CoachExchange {
+  /** the rows before the exchange (oldest first), at most `maxEarlier` of them */
+  earlier: PeekMessage[]
+}
+
 /**
- * The last exchange for the Live card's mini thread. While a reply is pending it is the
- * question just asked (no answer yet); otherwise the last real answer and the question
- * that led to it. Empty when there is no answer to show.
+ * The Live card's mini thread: the last exchange (as `lastExchange`) plus up to
+ * `maxEarlier` rows before it, which a tall card shows above the exchange. Text keeps its
+ * line structure (`previewText`) unless another format is given.
+ */
+export function coachThread(messages: unknown, pending: boolean, maxEarlier: number, fmt: TextFormat = previewText): CoachThread {
+  const none: CoachThread = { question: null, answer: null, earlier: [] }
+  if (!Array.isArray(messages)) return none
+  const rows: PeekMessage[] = []
+  for (const raw of messages) {
+    const m = raw as LooseMessage
+    const answer = answerText(m, fmt)
+    if (answer) rows.push({ role: 'assistant', text: answer })
+    else {
+      const question = questionText(m, fmt)
+      if (question) rows.push({ role: 'user', text: question })
+    }
+  }
+  const lastOf = (role: PeekMessage['role']): number => {
+    for (let i = rows.length - 1; i >= 0; i--) if (rows[i].role === role) return i
+    return -1
+  }
+  let start: number
+  let question: string | null = null
+  let answer: string | null = null
+  if (pending) {
+    // the question just asked, waiting for its reply
+    start = lastOf('user')
+    if (start < 0) return none
+    question = rows[start].text
+  } else {
+    // the last real answer and the question right before it (if the row before is one)
+    const a = lastOf('assistant')
+    if (a < 0) return none
+    answer = rows[a].text
+    start = a
+    if (a > 0 && rows[a - 1].role === 'user') {
+      start = a - 1
+      question = rows[start].text
+    }
+  }
+  const earlier = maxEarlier > 0 ? rows.slice(Math.max(0, start - maxEarlier), start) : []
+  return { question, answer, earlier }
+}
+
+/**
+ * The last exchange for the Live card's mini thread, as single plain lines. While a reply
+ * is pending it is the question just asked (no answer yet); otherwise the last real answer
+ * and the question that led to it. Empty when there is no answer to show.
  */
 export function lastExchange(messages: unknown, pending: boolean): CoachExchange {
-  const none = { question: null, answer: null }
-  if (!Array.isArray(messages)) return none
-  if (pending) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const q = questionText(messages[i] as LooseMessage)
-      if (q) return { question: q, answer: null }
-    }
-    return none
-  }
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const answer = answerText(messages[i] as LooseMessage)
-    if (!answer) continue
-    for (let j = i - 1; j >= 0; j--) {
-      const m = messages[j] as LooseMessage
-      if (m?.role === 'assistant' && answerText(m)) break
-      const question = questionText(m)
-      if (question) return { question, answer }
-    }
-    return { question: null, answer }
-  }
-  return none
+  const { question, answer } = coachThread(messages, pending, 0, plainText)
+  return { question, answer }
 }

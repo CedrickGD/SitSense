@@ -6,13 +6,19 @@ import { buildFaceTopology, type FaceTopology } from '@renderer/overlay/bodyMesh
 const WASM_BASE = 'mediapipe/wasm'
 const MODEL_PATH = 'models/pose_landmarker_lite.task'
 const FACE_MODEL_PATH = 'models/face_landmarker.task'
+/**
+ * Room for the user plus one more pose. With room for one, the model tracks the first pose it
+ * finds and stops looking: a figure on the desk mat picked up while the chair was empty hid
+ * the user who sat down. The controller picks the user (posture/select.ts).
+ */
+const MAX_POSES = 2
 
 async function create(delegate: 'GPU' | 'CPU'): Promise<PoseLandmarker> {
   const fileset = await FilesetResolver.forVisionTasks(WASM_BASE)
   return PoseLandmarker.createFromOptions(fileset, {
     baseOptions: { modelAssetPath: MODEL_PATH, delegate },
     runningMode: 'VIDEO',
-    numPoses: 1,
+    numPoses: MAX_POSES,
     minPoseDetectionConfidence: 0.5,
     minTrackingConfidence: 0.5
   })

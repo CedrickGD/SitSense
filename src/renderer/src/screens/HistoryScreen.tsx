@@ -48,6 +48,14 @@ import { useHistoryData } from './history/useHistoryData'
 
 /** Bottom-row cards sit side by side once the content column is this wide. */
 const TWO_COL = '@[880px]:grid-cols-2'
+/**
+ * Day view: the bottom row takes the window's spare height (the hour bars use it), but only
+ * up to the cap — on a tall window the bars would tower and By issue would be mostly empty
+ * card. Past the cap the page simply ends (single column stacks and scrolls: no cap there).
+ */
+const BOTTOM_ROW = `grid flex-1 gap-4 ${TWO_COL} @[880px]:max-h-[440px]`
+/** Week view: the week × hour grid has a fixed size, so the row keeps its natural height. */
+const BOTTOM_ROW_WEEK = `grid gap-4 ${TWO_COL}`
 
 export default function HistoryScreen(): JSX.Element {
   const view = useAppStore((s) => s.historyView)
@@ -338,7 +346,7 @@ function DayView({
         )}
       </ChartCard>
 
-      <div className={`grid flex-1 gap-4 ${TWO_COL}`}>
+      <div className={BOTTOM_ROW}>
         <ChartCard
           eyebrow="By issue"
           muted={muted}
@@ -439,7 +447,7 @@ function WeekView({
         )}
       </ChartCard>
 
-      <div className={`grid flex-1 gap-4 ${TWO_COL}`}>
+      <div className={BOTTOM_ROW_WEEK}>
         <ChartCard
           eyebrow="By issue"
           muted={muted}

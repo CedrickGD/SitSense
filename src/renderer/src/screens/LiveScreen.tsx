@@ -4,7 +4,8 @@
 //   row 1: camera hero · Posture card (equal height; the camera is ≥ 16:9 and the card
 //          may stretch the row — the video is object-cover, overlays stay aligned)
 //   row 2: Today · Sitting · Coach (equal heights, min 176) — it takes whatever height the
-//          window has left, so a tall window grows the cards instead of leaving a gap
+//          window has left, so a tall window grows the cards instead of leaving a gap; each
+//          card spends the extra height on content (breakdown, detail rows, the thread)
 // Three tiers by window width:
 //   ≥ 1180       8/4 · then 6/3/3
 //   1000–1179    7/5 · then 5/3/4 (the Coach card stays above the fold at 1000×700)
@@ -88,7 +89,7 @@ export default function LiveScreen(): JSX.Element {
           <TodayCard timelineHeight={roomy ? 28 : short ? 16 : 20} room={spans === ROW2_SPANS.stacked ? 0 : cardRoom} />
         </div>
         <div className={`min-w-0 ${spans.sitting}`}>
-          <SittingCard />
+          <SittingCard room={cardRoom} />
         </div>
         <div className={`min-w-0 ${spans.coach}`}>
           <CoachCard room={cardRoom} />

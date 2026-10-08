@@ -1189,6 +1189,33 @@ export function Eyebrow({ children, className = '' }: { children: ReactNode; cla
   return <p className={`type-micro text-text-faint ${className}`}>{children}</p>
 }
 
+/**
+ * An inline row of short facts separated by "·" that wraps cleanly (`a · b · c`). Each
+ * MetaItem carries its dot in a 16 px left padding and the row is pulled left under a
+ * clipping box: an item that wraps to the start of a line has its dot clipped, so no
+ * separator ever dangles at a line end or leads a line. The box keeps 4 px for focus rings.
+ * `className` styles the row (type, color, margins).
+ */
+export function MetaRow({ children, className = '' }: { children: ReactNode; className?: string }): JSX.Element {
+  return (
+    <div className="-my-0.5 -ml-1 min-w-0 overflow-hidden py-0.5 pl-1">
+      <p className={`-ml-4 flex flex-wrap items-center ${className}`}>{children}</p>
+    </div>
+  )
+}
+
+/** One fact in a MetaRow. The dot has empty alt text, so screen readers don't announce it. */
+export function MetaItem({ children, className = '', title }: { children: ReactNode; className?: string; title?: string }): JSX.Element {
+  return (
+    <span
+      title={title}
+      className={`relative inline-flex min-w-0 max-w-full items-center pl-4 before:absolute before:left-[6px] before:text-text-faint before:content-['·'_/_''] ${className}`}
+    >
+      {children}
+    </span>
+  )
+}
+
 /** Hairline divider inside a card (16 px between groups). */
 export function Divider({ className = '' }: { className?: string }): JSX.Element {
   return <hr className={`my-4 border-0 border-t border-white/[0.06] ${className}`} />
@@ -1649,8 +1676,9 @@ export function EmptyState({ icon, headline, body, primary, secondary, actions, 
     <div className={`flex h-full flex-col items-center justify-center gap-6 p-8 text-center ${className}`}>
       {iconNode}
       <div className="flex flex-col items-center gap-2">
-        <h2 className="type-h3 text-text">{headline}</h2>
-        <p className="max-w-[44ch] type-body-lg text-text-dim">{body}</p>
+        <h2 className="type-h3 text-balance text-text">{headline}</h2>
+        {/* balanced: centered lines of even length, no lone word on the last one */}
+        <p className="max-w-[44ch] type-body-lg text-balance text-text-dim">{body}</p>
       </div>
       {hasActions && (
         <div className="flex flex-wrap items-center justify-center gap-2">
